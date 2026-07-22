@@ -36,7 +36,8 @@ set_io -nowarn CAM_PWDN   28   # P1B10
 # ---------------- PMOD2: ST7789 240x280 ----------------
 set_io -nowarn LCD_SCK    27   # P2_1
 set_io -nowarn LCD_MOSI   25   # P2_2
-set_io -nowarn LCD_DC     21   # P2_3
-set_io -nowarn LCD_CS_N   19   # P2_4
-set_io -nowarn LCD_RES_N  26   # P2_7
+set_io -nowarn LCD_RES_N  21   # P2_3      
+set_io -nowarn LCD_DC     19   # P2_4  
+set_io -nowarn LCD_CS_N   26   # P2_7
 set_io -nowarn LCD_BL     23   # P2_8
+
