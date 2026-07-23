@@ -24,3 +24,16 @@ make clean
 make
 make prog
 ```
+
+## Follow-on: faster SPI and camera clock
+
+`/4` SPI division was more conservative than necessary. `spi_stream_tx` can
+run as fast as `clk_sys/2` (each SCLK half-period needs at least one
+`clk_sys` cycle), so the panel SCLK was raised to 19.500 MHz (`SPI_HZ`
+parameter, `/2` instead of `/4`). That doubles the display's drain rate,
+which let the camera's `CLKRC` divider loosen from `/6` to `/3`
+(6.500 MHz internal clock) while keeping the same ~4.76% per-line timing
+margin and ~70-pixel FIFO peak. Nominal frame rate roughly doubles, from
+about 4.06 fps to about 8.13 fps. See `GOAL.md` and `README.md` for the
+updated clock tree and line-rate proof, and `timing_check.py` for the
+numbers.

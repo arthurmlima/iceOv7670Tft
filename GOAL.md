@@ -15,21 +15,27 @@ valid step below the measured timing limit. The camera and SPI rates scale with 
 12.000 MHz
     │
     └─ SB_PLL40_PAD → 39.000 MHz system
-                         ├─ /4 SPI bit clock → 9.750 MHz ST7789 SCK
+                         ├─ /2 SPI bit clock → 19.500 MHz ST7789 SCK
                          └─ /2 toggle        → 19.500 MHz OV7670 XCLK
                                                    │
-                                                   ├─ CLKRC /6
-                                                   │    = 3.250 MHz internal
+                                                   ├─ CLKRC /3
+                                                   │    = 6.500 MHz internal
                                                    └─ QVGA PCLK /2
-                                                        ≈ 1.625 MHz
+                                                        ≈ 3.250 MHz
 ```
+
+SPI now runs at sys_clk/2, the fastest bit rate this single-clock-domain SPI
+engine can generate (each SCLK half-period needs at least one clk_sys cycle).
+Doubling the display's drain rate lets the camera's CLKRC divider be loosened
+from /6 to /3 while preserving the same line-time margin, roughly doubling
+frame rate.
 
 Relevant OV7670 settings:
 
 | Register | Value | Purpose |
 |---|---:|---|
 | `COM7` 0x12 | 0x14 | QVGA selection plus RGB output |
-| `CLKRC` 0x11 | 0x05 | internal clock = XCLK / 6 |
+| `CLKRC` 0x11 | 0x02 | internal clock = XCLK / 3 |
 | `DBLV` 0x6B | 0x0A | camera PLL disabled |
 | `COM3` 0x0C | 0x04 | enable downsample/crop path |
 | `COM14` 0x3E | 0x19 | manual QVGA scaling and PCLK / 2 |
@@ -50,17 +56,18 @@ Relevant OV7670 settings:
 Using 1568 camera internal-clock cycles per QVGA line:
 
 ```text
-camera line = 1568 / 3.250 MHz = 482.46 us
-panel line  = 280 × 16 / 9.750 MHz = 459.49 us
-margin      = 22.97 us per line
+camera line = 1568 / 6.500 MHz = 241.23 us
+panel line  = 280 × 16 / 19.500 MHz = 229.74 us
+margin      = 11.49 us per line
 ```
 
 The panel is slower than the camera during the active cropped burst but faster
 over the complete line. The FIFO rises by roughly 70 pixels during the retained
-active region and drains through horizontal blanking. A 256-pixel FIFO provides
-more than 3× that expected peak.
+active region and drains through horizontal blanking -- the same peak as
+before, since camera and display rates doubled together. A 256-pixel FIFO
+still provides more than 3× that expected peak.
 
-The nominal frame rate is approximately 4.06 fps, based on scaling the
+The nominal frame rate is approximately 8.13 fps, based on scaling the
 preliminary 10 fps figure at an 8 MHz camera internal clock.
 
 ## Synchronization strategy

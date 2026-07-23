@@ -24,3 +24,14 @@ Compared with the original ST7789 test-pattern project:
 
 The original test-pattern modules remain in the directory for comparison but
 are not in the Makefile source list.
+
+## Frame-rate follow-up
+
+14. `SPI_HZ` raised from 9.75 MHz to 19.50 MHz (`spi_stream_tx` `HALF_DIV`
+    goes from 2 to 1), the fastest SCLK this single-clock-domain SPI engine
+    can generate.
+15. `cam_init.v` changes `CLKRC` from `0x05` (/6) to `0x02` (/3) at both
+    table locations, now that the panel drains twice as fast.
+16. Net effect: the same ~4.76% per-line timing margin and ~70-pixel FIFO
+    peak are preserved, but nominal frame rate roughly doubles, from about
+    4.06 fps to about 8.13 fps.

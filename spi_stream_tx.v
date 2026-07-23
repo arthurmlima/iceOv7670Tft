@@ -11,11 +11,12 @@
 // extra idle SCLK period.  DC is latched with each byte and therefore changes
 // only at byte boundaries.
 //
-// SCLK = CLK_HZ / (2 * HALF_DIV).  With CLK_HZ=39.00 MHz and HALF_DIV=2,
-// SCLK is exactly 9.750 MHz.
+// SCLK = CLK_HZ / (2 * HALF_DIV).  With CLK_HZ=39.00 MHz and HALF_DIV=1,
+// SCLK is exactly 19.500 MHz -- the fastest this engine can generate, since
+// each SCLK half-period takes at least one clk_sys cycle.
 // ============================================================================
 module spi_stream_tx #(
-    parameter integer HALF_DIV = 2
+    parameter integer HALF_DIV = 1
 )(
     input  wire       clk,
     input  wire       resetn,

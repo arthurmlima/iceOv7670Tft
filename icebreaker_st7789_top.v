@@ -5,13 +5,16 @@
 //
 // OV7670 -> 256x16 FIFO -> ST7789, no CPU and no external framebuffer.
 // The display wiring and 39.00 MHz PLL are retained from the working test
-// pattern project. Camera timing is deliberately slowed to match the proven
-// 9.75 MHz SPI interface.
+// pattern project. SPI now runs at sys_clk/2 = 19.50 MHz (the fastest this
+// single-clock-domain SPI engine can generate), and the camera's CLKRC
+// divider was loosened to /3 to match -- roughly doubling frame rate over
+// the original 9.75 MHz / CLKRC=/6 pairing while keeping the same line-time
+// margin.
 // ============================================================================
 module icebreaker_st7789_top #(
     parameter integer USE_PLL        = 1,
     parameter integer SYS_CLK_HZ     = 39000000,
-    parameter integer SPI_HZ         = 9750000,
+    parameter integer SPI_HZ         = 19500000,
     parameter integer POR_MS         = 10,
     parameter integer BL_ACTIVE_HIGH = 1
 )(
