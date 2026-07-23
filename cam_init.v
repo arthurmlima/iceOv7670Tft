@@ -1,5 +1,7 @@
+`timescale 1ns / 1ps
+`default_nettype none
 // ============================================================================
-// cam_init.v - SCCB (I2C-like, write-only) master that walks a register ROM
+// cam_init.v - SCCB (I2C-like, write-only) master for the OV7670
 // into the OV7670 after power-up. Replaces write_config_cam()/config_cam():
 // there is no CPU, so the fabric owns camera bring-up.
 //
@@ -17,10 +19,11 @@
 // ---------------------------------------------------------------------------
 // Register table = the proven camera.h set, with exactly these deltas:
 //
-//   CLKRC 0x00 -> 0x02   internal clock = XCLK/3 = 8 MHz   (the fps anchor)
+//   COM7  0x04 -> 0x14   select QVGA as well as RGB
+//   CLKRC 0x00 -> 0x05   internal clock = XCLK/6 = 3.250 MHz
 //   DBLV  0x4A -> 0x0A   PLL x4 OFF (x4 would quadruple everything)
 //   COM3  0x00 -> 0x04   enable DCW              \
-//   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA 320x240, PCLK 4 MHz
+//   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA, PCLK 1.625 MHz
 //   + 0x70..0x73, 0xA2   canonical scaling regs  /
 //   RGB444 0x03 -> 0x00  RGB444 OFF  \  the old table left the sensor in
 //   COM15  0xF0 -> 0xD0  true RGB565 /  444/555 mode; the panel needs 565
@@ -30,7 +33,7 @@
 // ============================================================================
 
 module cam_init #(
-    parameter TICK_DIV   = 120,    // 48 MHz / (4 * 100 kHz) quarter-bit tick
+    parameter TICK_DIV   = 98,     // 39.00 MHz / 98 = 397.96 kHz quarter tick
     parameter BOOT_TICKS = 4000,   // ~10 ms after reset before first write
     parameter GAP_TICKS  = 800,    // ~2 ms between writes
     parameter RST_TICKS  = 4000    // ~10 ms settle after COM7 reset writes
@@ -49,8 +52,8 @@ module cam_init #(
             case (i)
                 6'd0 :  rom = 16'h1280;  // COM7   soft reset
                 6'd1 :  rom = 16'h1280;  // COM7   soft reset (twice, as proven)
-                6'd2 :  rom = 16'h1204;  // COM7   RGB output
-                6'd3 :  rom = 16'h1102;  // CLKRC  /3  (was 0x00)          [changed]
+                6'd2 :  rom = 16'h1214;  // COM7   QVGA + RGB output
+                6'd3 :  rom = 16'h1105;  // CLKRC  /6  (was 0x00)          [changed]
                 6'd4 :  rom = 16'h0C04;  // COM3   DCW enable (was 0x00)   [changed]
                 6'd5 :  rom = 16'h3E19;  // COM14  manual scale, PCLK/2    [changed]
                 6'd6 :  rom = 16'h8C00;  // RGB444 disable (was 0x03)      [changed]
@@ -66,7 +69,7 @@ module cam_init #(
                 6'd16:  rom = 16'h54E4;  // MTX6  /
                 6'd17:  rom = 16'h589E;  // MTXS
                 6'd18:  rom = 16'h3DC0;  // COM13  gamma en, UV auto
-                6'd19:  rom = 16'h1102;  // CLKRC  again (table wrote it twice)
+                6'd19:  rom = 16'h1105;  // CLKRC  /6 again
                 6'd20:  rom = 16'h1711;  // HSTART
                 6'd21:  rom = 16'h1861;  // HSTOP
                 6'd22:  rom = 16'h32A4;  // HREF
@@ -272,3 +275,4 @@ module cam_init #(
     end
 
 endmodule
+`default_nettype wire

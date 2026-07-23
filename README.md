@@ -1,110 +1,198 @@
-# OV7670 → ST7789 240×280, iCEBreaker, no CPU
+# iCEBreaker OV7670 → ST7789 live camera stream
 
-Live camera video straight to the panel: the ST7789's internal GRAM is the
-framebuffer, the FPGA only rate-matches. Total image memory on the FPGA is
-**one 256×16 FIFO (4 kbit, one EBR)** — about 0.4% of a framebuffer.
+This project extends the known-working ST7789 test-pattern design with an
+OV7670 camera. It is pure Verilog: no CPU, no external RAM, and no full
+framebuffer.
 
+The data path is:
+
+```text
+OV7670 RGB565 → center crop 320×240 to 280×240
+              → 256×16 synchronous FIFO (one iCE40 EBR)
+              → ST7789 RAMWR stream
 ```
-12 MHz ─ PLL ─ 48 MHz ──┬─ /2 → SCK  24 MHz ──────────────► ST7789
-                        └─ /2 → XCLK 24 MHz → OV7670
-                               CLKRC /3 → f_int 8 MHz
-                               QVGA, PCLK/2 → PCLK 4 MHz (sampled as data)
+
+The ST7789's own GRAM is the framebuffer. The FPGA FIFO only absorbs the
+difference between the camera's bursty active-video timing and the display's
+constant SPI drain rate.
+
+## Clock plan
+
+The display architecture is retained, with the PLL reduced one valid step to clear timing:
+
+| Clock | Value | Source |
+|---|---:|---|
+| Board oscillator | 12.000 MHz | iCEBreaker |
+| FPGA system clock | 39.000 MHz | `SB_PLL40_PAD` |
+| ST7789 SCLK | 9.750 MHz | system clock / 4 |
+| OV7670 XCLK | 19.500 MHz | system clock / 2 |
+| OV7670 internal clock | 3.250 MHz | XCLK / 6, `CLKRC=0x05` |
+| OV7670 PCLK | approximately 1.625 MHz | QVGA scaling, PCLK / 2 |
+
+The PLL settings are `DIVR=0`, `DIVF=51`, `DIVQ=4`, and
+`FILTER_RANGE=1`, which produce 39.00 MHz from 12 MHz. This is the nearest
+valid PLL step below the measured 39.73 MHz timing limit.
+
+The camera is intentionally slower than the preliminary 48/24 MHz proposal.
+At the 9.75 MHz display SCLK, the original camera `/3` setting would
+produce pixels faster than the panel can drain them.
+
+## Line-rate proof
+
+Using the OV7670 QVGA timing assumption from the preliminary design
+(1568 internal-clock cycles per line):
+
+```text
+camera line time = 1568 / 3.250 MHz = 482.46 us
+display line time = 280 × 16 / 9.750 MHz = 459.49 us
+line slack        = 22.97 us = 4.76%
 ```
 
-One display line (280×16 SCK) fits in one camera line (1568 f_int cycles):
-24 ≥ 2.857 × 8 MHz, ~5% slack. Frame rate **10.0 fps**, display genlocked to
-the camera. Panel runs **landscape** (MADCTL 0xA0), window CASET 20..299 /
-RASET 0..239; the camera's 320-pixel QVGA lines are center-cropped to 280 —
-an exact 1:1 map, no scaler.
+The center crop retains camera columns 20 through 299. During active video the
+FIFO rises by about 70 pixels and then drains during the remaining camera line
+time. A 256-pixel FIFO therefore gives substantial margin without spending a
+framebuffer's worth of EBRs.
 
-Verified in this repo: `make sim` runs an end-to-end smoke test (SCCB init →
-panel init → two frames; checks exact byte counts, the crop, and that the
-FIFO never overflows). Synthesis/PnR with yosys + nextpnr closes timing at
-48 MHz (50.3 MHz achieved), 677/5280 LCs, 2/30 EBRs (pixel FIFO + init ROM).
+The expected frame rate is approximately 4.06 fps if the preliminary design's
+10 fps at an 8 MHz internal camera clock scales linearly.
 
-## Files
+Run:
 
-| file | contents |
-|---|---|
-| `top.v` | PLL, POR, XCLK, open-drain SIOD (SB_IO + pull-up), wiring, LEDs |
-| `cam_init.v` | SCCB master + OV7670 register ROM (see deltas below) |
-| `cam_capture.v` | PCLK-as-data sampling, RGB565 assembly, 320→280 crop |
-| `pixel_fifo.v` | the one EBR |
-| `st7789_ctrl.v` | reset dance, init ROM, per-frame window, pixel streaming |
-| `spi8.v` | gapless mode-0 byte engine (16 clk/byte back-to-back) |
-| `icebreaker.pcf`, `Makefile`, `sim/tb_smoke.v` | build + smoke test |
+```sh
+python3 timing_check.py
+```
+
+to print the exact values used by this repository.
+
+## Display geometry
+
+The panel is operated in landscape mode:
+
+- `MADCTL = 0xA0`
+- visible stream: 280 × 240 pixels
+- `CASET = 20..299`
+- `RASET = 0..239`
+- camera input: QVGA 320 × 240 (`COM7=0x14`)
+- crop: remove 20 pixels from each horizontal side
+- pixel format: RGB565, high byte first
+
+The ST7789 hardware reset timing and initialization register sequence are
+retained from the working display project.
 
 ## Wiring
 
-Camera module → PMOD1A/1B, panel → PMOD2 (all 3.3 V; power from the PMOD
-3V3/GND pins; keep XCLK and PCLK jumpers short).
+The iCEBreaker PMOD signals are 3.3 V. Use an OV7670 breakout explicitly
+rated for 3.3 V logic. A bare sensor requires its specified rails and suitable
+level translation.
 
-| OV7670 pin | FPGA signal | PMOD pos | | ST7789 pin | FPGA signal | PMOD pos |
-|---|---|---|---|---|---|---|
-| D0–D7 | CAM_D[0..7] | 1A: 1,2,3,4,7,8,9,10 | | SCL/SCK | LCD_SCK | 2: 1 |
-| XCLK | CAM_XCLK | 1B: 1 | | SDA/MOSI | LCD_MOSI | 2: 2 |
-| PCLK | CAM_PCLK | 1B: 2 | | DC | LCD_DC | 2: 3 |
-| HREF | CAM_HREF | 1B: 3 | | CS | LCD_CS_N | 2: 4 |
-| VSYNC | CAM_VSYNC | 1B: 4 | | RES | LCD_RES_N | 2: 7 |
-| SIOC | CAM_SIOC | 1B: 7 | | BLK | LCD_BL | 2: 8 |
-| SIOD | CAM_SIOD | 1B: 8 | | | | |
-| RESET# | CAM_RST_N | 1B: 9 | | | | |
-| PWDN | CAM_PWDN | 1B: 10 | | | | |
+### ST7789 on PMOD 1B
 
-SIOD uses the FPGA's internal pull-up; most OV7670 breakouts also have their
-own — both together is fine. If SCCB ever proves flaky over long jumpers, an
-external 4.7 kΩ to 3.3 V on SIOC/SIOD settles it.
+These are the same FPGA pins used by the working display design.
 
-## Build / flash
+| ST7789 | iCEBreaker | FPGA pin |
+|---|---|---:|
+| SCL/SCK | P1B1 | 43 |
+| SDA/MOSI | P1B2 | 38 |
+| RES | P1B3 | 34 |
+| DC | P1B4 | 31 |
+| CS | P1B7 | 42 |
+| BLK | P1B8 | 36 |
 
+### OV7670 data on PMOD 1A
+
+| OV7670 | iCEBreaker | FPGA pin |
+|---|---|---:|
+| D0 | P1A1 | 4 |
+| D1 | P1A2 | 2 |
+| D2 | P1A3 | 47 |
+| D3 | P1A4 | 45 |
+| D4 | P1A7 | 3 |
+| D5 | P1A8 | 48 |
+| D6 | P1A9 | 46 |
+| D7 | P1A10 | 44 |
+
+### OV7670 control on PMOD 2
+
+The stock LED/button wing uses PMOD 2. Remove it or expose that connector before
+connecting the camera.
+
+| OV7670 | iCEBreaker | FPGA pin |
+|---|---|---:|
+| XCLK | P2_1 | 27 |
+| PCLK | P2_2 | 25 |
+| HREF | P2_3 | 21 |
+| VSYNC | P2_4 | 19 |
+| SIOC | P2_7 | 26 |
+| SIOD | P2_8 | 23 |
+| RESET# | P2_9 | 20 |
+| PWDN | P2_10 | 18 |
+
+`SIOD` is open-drain and uses the FPGA's internal pull-up. A short external
+4.7 kΩ pull-up to 3.3 V may help if SCCB wiring is long. `SIOC` is push-pull.
+
+Connect the camera and display grounds together. Power each module according to
+its breakout-board requirements, and do not expose FPGA pins to more than 3.3 V.
+
+## Build and program
+
+Required tools:
+
+- `yosys`
+- `nextpnr-ice40`
+- `icepack`
+- `iceprog`
+
+Commands:
+
+```sh
+make
+make prog
 ```
-make        # yosys → nextpnr (--freq 48) → icepack
-make prog   # iceprog
-make sim    # iverilog smoke test
-```
 
-## Bring-up
+The build targets `up5k-sg48` and asks nextpnr to close timing at 39.00 MHz.
 
-1. Power up with both modules connected. The backlight stays **off** during
-   panel init and turns on ~0.5 s after configuration.
-2. **Green LED on** = camera SCCB done AND panel init done → streaming.
-3. **Red LED** = the pixel FIFO overflowed at least once since reset. It
-   should never light; if it does, the clock plan is off (check CLKRC/DBLV
-   wiring of your module, i.e. that a stray camera PLL isn't enabled).
-4. User button = full reset (re-runs both init sequences).
+## Status LEDs and reset
 
-## Knobs
+- Green LED on: camera SCCB initialization and ST7789 initialization completed.
+- Red LED on: FIFO overflow, FIFO underflow, or a new camera frame arrived
+  before the previous panel transfer completed.
+- User button: full camera and panel reset/reinitialization.
 
-**Orientation.** If the image is mirrored or upside down (module batches
-vary), change one ROM byte: `st7789_ctrl.v` init ROM index 13, `16'h41A0` →
-`16'h4160` (MADCTL 0x60, the other landscape). Camera-side MVFP (SCCB reg
-0x1E) is the alternative lever.
+The backlight remains off until panel initialization completes.
 
-**Colors wrong (red/blue smearing, green tint).** The two RGB565 bytes are
-swapped somewhere in the chain on some module revisions. Swap the assembly in
-`cam_capture.v`: `{hi_byte, d_s1}` → `{d_s1, hi_byte}`.
+## Important files
 
-**48 MHz margin.** Timing closes at 50.3 MHz, but if a modified build ever
-misses, the whole system scales coherently to 36 MHz: in `top.v` set PLL
-`DIVF = 7'b0101111` (icepll -i 12 -o 36), and nothing else — SCK 18 / XCLK 18
-→ f_int 6 MHz, ratio 3.0 ≥ 2.857, 7.5 fps. The ms/SCCB tick constants are
-parameters derived from the clock, so pass `CLK_HZ`/`TICK_DIV` accordingly
-(`36_000_000` and `90`).
+| File | Function |
+|---|---|
+| `icebreaker_st7789_top.v` | PLL, reset, XCLK, SCCB I/O, integration, LEDs |
+| `cam_init.v` | OV7670 SCCB register sequence with `/6` clock setting |
+| `cam_capture.v` | synchronized PCLK sampling, RGB565 assembly, 320→280 crop |
+| `pixel_fifo.v` | 256×16 single-clock rate-matching FIFO |
+| `st7789_camera_ctrl.v` | panel reset/init/window and FIFO pixel streaming |
+| `spi_stream_tx.v` | gapless mode-0 byte transmitter at 9.75 MHz |
+| `st7789_init_rom.v` | known-working panel initialization sequence |
+| `icebreaker.pcf` | display and camera pin assignments |
+| `timing_check.py` | clock, line-slack, and FIFO-burst calculations |
 
-## Camera register table: what changed and why
+The old `st7789_rgb_test.v`, `rgb_test_pattern.v`, and `spi_master_tx.v` are
+retained as references but are not included in the camera build.
 
-The SCCB ROM is the proven register set verbatim, except:
+## Bring-up checks
 
-| reg | was | now | why |
-|---|---|---|---|
-| CLKRC 0x11 | 0x00 | 0x02 | f_int = XCLK/3 = 8 MHz — the rate-match anchor |
-| DBLV 0x6B | 0x4A | 0x0A | ×4 PLL **off** (×4 would quadruple every rate) |
-| COM3 0x0C | 0x00 | 0x04 | DCW enable \ |
-| COM14 0x3E | 0x00 | 0x19 | manual scale, PCLK/2 — QVGA 320×240 |
-| 0x70–0x73, 0xA2 | — | added | canonical QVGA scaling set / |
-| RGB444 0x8C | 0x03 | 0x00 | RGB444 mode **off** \ the old table left the |
-| COM15 0x40 | 0xF0 | 0xD0 | true RGB565, full range / sensor in 444/555 |
+1. Verify `cam_xclk` is approximately 19.500 MHz.
+2. Verify `cam_sioc` activity after reset and that the green LED eventually
+   turns on.
+3. Verify `cam_pclk` is approximately 1.625 MHz during active video. A much
+   higher value usually means `CLKRC` or `DBLV` did not take effect.
+4. If the image colors are byte-swapped, change
+   `{hi_byte, d_s1}` to `{d_s1, hi_byte}` in `cam_capture.v`.
+5. If the image is mirrored or upside down, try ST7789 `MADCTL=0x60` or adjust
+   OV7670 `MVFP` register `0x1E`.
+6. If the red LED turns on, probe XCLK/PCLK first; the design depends on the
+   camera accepting `CLKRC=0x05` and `DBLV=0x0A`.
 
-The last two matter: the previous pipeline tolerated whatever byte format the
-sensor emitted because software unpacked it, but the panel consumes raw
-RGB565 — so the sensor must actually be in RGB565 mode.
+## Verification note
+
+The RTL is organized for yosys/nextpnr and has been statically reviewed in this
+package. Run `make` on the target toolchain to confirm synthesis, EBR inference,
+pin placement, and final timing on the installed tool versions.

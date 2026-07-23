@@ -1,70 +1,87 @@
+`timescale 1ns / 1ps
+`default_nettype none
 // ============================================================================
-// pixel_fifo.v - 256 x 16 synchronous FIFO. Maps to exactly one SB_RAM40_4K.
+// pixel_fifo.v
 //
-// This is the ONLY image memory in the whole design (4 kbit = 0.4% of a
-// framebuffer). It absorbs the per-line rate mismatch between the camera
-// burst (2.0 Mpx/s while HREF is high) and the SPI drain (1.5 Mpx/s
-// continuous). Worst-case occupancy is ~70 pixels; 256 gives 3.5x margin.
+// Single-clock 256 x 16 RGB565 FIFO.  The storage is exactly 4096 bits and is
+// written in an inference-friendly synchronous style so yosys maps it to one
+// iCE40UP5K EBR.
 //
-// 'clear' resets both pointers (used at every camera VSYNC so a frame always
-// starts from an empty, aligned FIFO). 'overflow' is a sticky debug flag:
-// it should never assert if the clock plan is right.
-//
-// Read side has one cycle of latency (BRAM output register); rdata holds its
-// value until the next read.
+// "flush" is asserted at each accepted camera frame boundary.  Overflow and
+// underflow are sticky until reset so they can be shown on an LED.
 // ============================================================================
+module pixel_fifo #(
+    parameter integer DEPTH = 256,
+    parameter integer AW    = 8
+)(
+    input  wire          clk,
+    input  wire          rst,
+    input  wire          flush,
 
-module pixel_fifo (
-    input  wire        clk,
-    input  wire        rst,
-    input  wire        clear,
+    input  wire          wr_en,
+    input  wire [15:0]   wr_data,
+    output wire          full,
 
-    input  wire        wr,
-    input  wire [15:0] wdata,
-    output wire        full,
+    input  wire          rd_en,
+    output reg  [15:0]   rd_data,
+    output reg           rd_valid,
+    output wire          empty,
 
-    input  wire        rd,
-    output reg  [15:0] rdata,
-    output wire        empty,
-
-    output reg         overflow
+    output reg           overflow,
+    output reg           underflow,
+    output reg  [AW:0]   level
 );
+    (* ram_style = "block" *) reg [15:0] mem [0:DEPTH-1];
+    reg [AW-1:0] wr_ptr;
+    reg [AW-1:0] rd_ptr;
 
-    reg [15:0] mem [0:255];
-    reg [8:0]  wp, rp;                 // extra MSB distinguishes full/empty
+    wire do_wr = wr_en && !full;
+    wire do_rd = rd_en && !empty;
 
-    assign empty = (wp == rp);
-    assign full  = (wp[8] != rp[8]) && (wp[7:0] == rp[7:0]);
+    assign empty = (level == {(AW+1){1'b0}});
+    assign full  = (level == DEPTH);
 
-    // Memory write port
     always @(posedge clk) begin
-        if (wr && !full && !clear && !rst)
-            mem[wp[7:0]] <= wdata;
-    end
-
-    // Memory read port (registered output -> 1 cycle latency)
-    always @(posedge clk) begin
-        if (rd && !empty)
-            rdata <= mem[rp[7:0]];
-    end
-
-    // Pointers
-    always @(posedge clk) begin
-        if (rst || clear) begin
-            wp <= 9'd0;
-            rp <= 9'd0;
+        if (rst) begin
+            wr_ptr    <= {AW{1'b0}};
+            rd_ptr    <= {AW{1'b0}};
+            rd_data   <= 16'h0000;
+            rd_valid  <= 1'b0;
+            level     <= {(AW+1){1'b0}};
+            overflow  <= 1'b0;
+            underflow <= 1'b0;
         end else begin
-            if (wr && !full)  wp <= wp + 9'd1;
-            if (rd && !empty) rp <= rp + 9'd1;
+            rd_valid <= 1'b0;
+
+            if (flush) begin
+                wr_ptr   <= {AW{1'b0}};
+                rd_ptr   <= {AW{1'b0}};
+                level    <= {(AW+1){1'b0}};
+                rd_valid <= 1'b0;
+            end else begin
+                if (do_wr) begin
+                    mem[wr_ptr] <= wr_data;
+                    wr_ptr      <= wr_ptr + 1'b1;
+                end
+
+                if (do_rd) begin
+                    rd_data  <= mem[rd_ptr];
+                    rd_ptr   <= rd_ptr + 1'b1;
+                    rd_valid <= 1'b1;
+                end
+
+                case ({do_wr, do_rd})
+                    2'b10: level <= level + 1'b1;
+                    2'b01: level <= level - 1'b1;
+                    default: level <= level;
+                endcase
+            end
+
+            if (wr_en && full)
+                overflow <= 1'b1;
+            if (rd_en && empty)
+                underflow <= 1'b1;
         end
     end
-
-    // Sticky overflow (cleared only by reset / button)
-    always @(posedge clk) begin
-        if (rst)
-            overflow <= 1'b0;
-        else if (wr && full)
-            overflow <= 1'b1;
-    end
-
 endmodule
+`default_nettype wire

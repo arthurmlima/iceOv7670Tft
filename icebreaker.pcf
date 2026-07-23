@@ -1,43 +1,46 @@
-# ============================================================================
-# icebreaker.pcf - OV7670 -> ST7789 pin map (iCEBreaker v1.0, iCE40UP5K-SG48)
-#
-# PMOD physical pinout, looking at the female connector on the board:
-#   top row:    1  2  3  4  (5=GND 6=3V3)
-#   bottom row: 7  8  9 10 (11=GND 12=3V3)
-# Both the OV7670 module and the ST7789 module are 3.3 V devices; power them
-# from the PMOD 3V3/GND pins. Keep the XCLK and PCLK jumpers short.
-# ============================================================================
+# iCEBreaker 12 MHz oscillator
+set_io -nowarn CLK 35
 
-set_io -nowarn CLK        35
-set_io -nowarn BTN_N      10
-set_io -nowarn LEDR_N     11
-set_io -nowarn LEDG_N     37
+# On-board active-low button and LEDs
+set_io -nowarn BTN_N 10
+set_io -nowarn LEDR_N 11
+set_io -nowarn LEDG_N 37
 
-# ---------------- PMOD1A: camera data bus ----------------
-set_io -nowarn CAM_D[0]    4   # P1A1
-set_io -nowarn CAM_D[1]    2   # P1A2
-set_io -nowarn CAM_D[2]   47   # P1A3
-set_io -nowarn CAM_D[3]   45   # P1A4
-set_io -nowarn CAM_D[4]    3   # P1A7
-set_io -nowarn CAM_D[5]   48   # P1A8
-set_io -nowarn CAM_D[6]   46   # P1A9
-set_io -nowarn CAM_D[7]   44   # P1A10
+# ----------------------------------------------------------------------
+# ST7789: keep the existing known-working six display signals on PMOD 2
+# ----------------------------------------------------------------------
+set_io -nowarn tft_scl 27   # P2B1
+set_io -nowarn tft_sda 25   # P2B2
+set_io -nowarn tft_res 21   # P2B3
+set_io -nowarn tft_dc  19   # P2B4
+set_io -nowarn tft_cs  26   # P2B7
+set_io -nowarn tft_blk 23   # P2B8
 
-# ---------------- PMOD1B: camera control ----------------
-set_io -nowarn CAM_XCLK   43   # P1B1
-set_io -nowarn CAM_PCLK   38   # P1B2
-set_io -nowarn CAM_HREF   34   # P1B3
-set_io -nowarn CAM_VSYNC  31   # P1B4
-set_io -nowarn CAM_SIOC   42   # P1B7
-set_io -nowarn CAM_SIOD   36   # P1B8
-set_io -nowarn CAM_RST_N  32   # P1B9
-set_io -nowarn CAM_PWDN   28   # P1B10
 
-# ---------------- PMOD2: ST7789 240x280 ----------------
-set_io -nowarn LCD_SCK    27   # P2_1
-set_io -nowarn LCD_MOSI   25   # P2_2
-set_io -nowarn LCD_RES_N  21   # P2_3      
-set_io -nowarn LCD_DC     19   # P2_4  
-set_io -nowarn LCD_CS_N   26   # P2_7
-set_io -nowarn LCD_BL     23   # P2_8
+# ----------------------------------------------------------------------
+# OV7670 8-bit data bus on PMOD 1A
+# ----------------------------------------------------------------------
+set_io -nowarn cam_siod  4    # P1A1
+set_io -nowarn cam_href  2    # P1A2
+set_io -nowarn cam_xclk  47   # P1A3
+set_io -nowarn cam_pwdn  45   # P1A4
+set_io -nowarn cam_sioc  3    # P1A7
+set_io -nowarn cam_vsync 48   # P1A8
+set_io -nowarn cam_pclk  46   # P1A9
+set_io -nowarn cam_rst_n 44   # P1A10
+
+
+
+# ----------------------------------------------------------------------
+# OV7670 8-bit data bus on PMOD 1B
+# ----------------------------------------------------------------------
+set_io -nowarn cam_d[0] 43   # P1B1
+set_io -nowarn cam_d[1] 38   # P1B2
+set_io -nowarn cam_d[2] 34   # P1B3
+set_io -nowarn cam_d[3] 31   # P1B4
+set_io -nowarn cam_d[4] 42   # P1B7
+set_io -nowarn cam_d[5] 36   # P1B8
+set_io -nowarn cam_d[6] 32   # P1B9
+set_io -nowarn cam_d[7] 28   # P1B10
+
 

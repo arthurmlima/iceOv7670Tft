@@ -1,35 +1,33 @@
-# OV7670 -> ST7789 on iCEBreaker, open toolchain (yosys + nextpnr + icestorm)
+TOP      := icebreaker_st7789_top
+PCF      := icebreaker.pcf
+DEVICE   := up5k
+PACKAGE  := sg48
+FREQ     := 39.00
 
-PROJ  = cam_st7789
-SRCS  = top.v spi8.v st7789_ctrl.v cam_init.v cam_capture.v pixel_fifo.v
-FREQ  = 48
+SOURCES  := icebreaker_st7789_top.v \
+            cam_init.v cam_capture.v pixel_fifo.v \
+            st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
 
-all: $(PROJ).bin
+all: $(TOP).bin
 
-$(PROJ).json: $(SRCS)
-	yosys -p 'synth_ice40 -top top -json $@' $(SRCS)
+$(TOP).json: $(SOURCES)
+	yosys -ql $(TOP).yslog -p 'synth_ice40 -top $(TOP) -json $@' $(SOURCES)
 
-$(PROJ).asc: $(PROJ).json icebreaker.pcf
-	nextpnr-ice40 --up5k --package sg48 --freq $(FREQ) \
-	    --json $(PROJ).json --pcf icebreaker.pcf --asc $@
+$(TOP).asc: $(TOP).json $(PCF)
+	nextpnr-ice40 --$(DEVICE) --package $(PACKAGE) --freq $(FREQ) \
+		--json $< --pcf $(PCF) --asc $@ --log $(TOP).nextpnr.log
 
-$(PROJ).bin: $(PROJ).asc
+$(TOP).bin: $(TOP).asc
 	icepack $< $@
 
-prog: $(PROJ).bin
+prog: $(TOP).bin
 	iceprog $<
 
-time: $(PROJ).asc
-	icetime -d up5k -c $(FREQ) $<
-
-# ---- simulation (iverilog): shrunk timing parameters, see sim/tb_smoke.v ----
-sim: sim/tb_smoke.v $(SRCS)
-	iverilog -g2005 -o sim/tb_smoke.vvp \
-	    sim/tb_smoke.v sim/ice40_stubs.v \
-	    spi8.v st7789_ctrl.v cam_init.v cam_capture.v pixel_fifo.v
-	vvp sim/tb_smoke.vvp
+timing:
+	python3 timing_check.py
 
 clean:
-	rm -f $(PROJ).json $(PROJ).asc $(PROJ).bin sim/*.vvp sim/*.vcd
+	rm -f $(TOP).json $(TOP).asc $(TOP).bin \
+	      $(TOP).yslog $(TOP).nextpnr.log
 
-.PHONY: all prog time sim clean
+.PHONY: all prog timing clean
