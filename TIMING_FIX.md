@@ -37,3 +37,14 @@ margin and ~70-pixel FIFO peak. Nominal frame rate roughly doubles, from
 about 4.06 fps to about 8.13 fps. See `GOAL.md` and `README.md` for the
 updated clock tree and line-rate proof, and `timing_check.py` for the
 numbers.
+
+## Follow-on: PLL raised to 42.00 MHz
+
+The 39.00 MHz build closed with 43.40 MHz of nextpnr-reported margin unused.
+Empirically rebuilding at higher `--freq` targets found 42.00 MHz
+(`DIVR=0`, `DIVF=55`, `DIVQ=4`) reproducibly closes timing (45.00 MHz
+achieved across three clean rebuilds), while 43.5 MHz and above did not.
+`SYS_CLK_HZ`/`SPI_HZ` are now 42000000/21000000 and the Makefile `FREQ`
+default is 42.00. Since OV7670 XCLK is also `sys_clk/2`, the camera and
+display rates scaled together and the ~4.76% line-time margin is unchanged.
+Frame rate rises from about 8.13 fps to about 8.75 fps.

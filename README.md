@@ -18,28 +18,34 @@ constant SPI drain rate.
 
 ## Clock plan
 
-The display architecture is retained, with the PLL reduced one valid step to clear timing:
+The display architecture is retained, with the PLL raised as far as nextpnr
+reproducibly closes timing:
 
 | Clock | Value | Source |
 |---|---:|---|
 | Board oscillator | 12.000 MHz | iCEBreaker |
-| FPGA system clock | 39.000 MHz | `SB_PLL40_PAD` |
-| ST7789 SCLK | 19.500 MHz | system clock / 2 |
-| OV7670 XCLK | 19.500 MHz | system clock / 2 |
-| OV7670 internal clock | 6.500 MHz | XCLK / 3, `CLKRC=0x02` |
-| OV7670 PCLK | approximately 3.250 MHz | QVGA scaling, PCLK / 2 |
+| FPGA system clock | 42.000 MHz | `SB_PLL40_PAD` |
+| ST7789 SCLK | 21.000 MHz | system clock / 2 |
+| OV7670 XCLK | 21.000 MHz | system clock / 2 |
+| OV7670 internal clock | 7.000 MHz | XCLK / 3, `CLKRC=0x02` |
+| OV7670 PCLK | 3.500 MHz | QVGA scaling, PCLK / 2 |
 
-The PLL settings are `DIVR=0`, `DIVF=51`, `DIVQ=4`, and
-`FILTER_RANGE=1`, which produce 39.00 MHz from 12 MHz. This is the nearest
-valid PLL step below the measured 39.73 MHz timing limit.
+The PLL settings are `DIVR=0`, `DIVF=55`, `DIVQ=4`, and
+`FILTER_RANGE=1`, which produce 42.00 MHz from 12 MHz. nextpnr reported a
+43.40 MHz limit for the previous 39.00 MHz build; 42.00 MHz was verified to
+close timing reproducibly (three clean rebuilds, 45.00 MHz achieved each
+time). Targets from 43.5 MHz up failed to close -- nextpnr's placement search
+gets non-monotonic that close to the edge, so 42.00 MHz is treated as the
+practical ceiling for this netlist rather than something derived from a
+formula.
 
-SPI now runs at system clock / 2, the fastest bit rate `spi_stream_tx` can
+SPI runs at system clock / 2, the fastest bit rate `spi_stream_tx` can
 generate in a single clock domain (each SCLK half-period needs at least one
-`clk_sys` cycle). Doubling the display's drain rate compared with the
-original 9.75 MHz interface let the camera's `CLKRC` divider loosen from /6
-to /3, roughly doubling frame rate while preserving the same line-time
-safety margin. Pushing `CLKRC` past /3 (or `SPI_HZ` past system clock / 2)
-would erase that margin -- see the proof below.
+`clk_sys` cycle). Since OV7670 XCLK is also system clock / 2, raising the
+system clock scales both the camera's pixel rate and the display's drain rate
+together, so the line-time safety margin below is unchanged from the 39 MHz
+build. Pushing `CLKRC` past /3 (or `SPI_HZ` past system clock / 2) independent
+of that scaling would erase the margin -- see the proof below.
 
 ## Line-rate proof
 
@@ -47,9 +53,9 @@ Using the OV7670 QVGA timing assumption from the preliminary design
 (1568 internal-clock cycles per line):
 
 ```text
-camera line time = 1568 / 6.500 MHz = 241.23 us
-display line time = 280 × 16 / 19.500 MHz = 229.74 us
-line slack        = 11.49 us = 4.76%
+camera line time = 1568 / 7.000 MHz = 224.00 us
+display line time = 280 × 16 / 21.000 MHz = 213.33 us
+line slack        = 10.67 us = 4.76%
 ```
 
 The center crop retains camera columns 20 through 299. During active video the
@@ -57,7 +63,7 @@ FIFO rises by about 70 pixels and then drains during the remaining camera line
 time. A 256-pixel FIFO therefore gives substantial margin without spending a
 framebuffer's worth of EBRs.
 
-The expected frame rate is approximately 8.13 fps if the preliminary design's
+The expected frame rate is approximately 8.75 fps if the preliminary design's
 10 fps at an 8 MHz internal camera clock scales linearly.
 
 Run:
@@ -153,7 +159,7 @@ make
 make prog
 ```
 
-The build targets `up5k-sg48` and asks nextpnr to close timing at 39.00 MHz.
+The build targets `up5k-sg48` and asks nextpnr to close timing at 42.00 MHz.
 
 ## Status LEDs and reset
 
@@ -173,7 +179,7 @@ The backlight remains off until panel initialization completes.
 | `cam_capture.v` | synchronized PCLK sampling, RGB565 assembly, 320→280 crop |
 | `pixel_fifo.v` | 256×16 single-clock rate-matching FIFO |
 | `st7789_camera_ctrl.v` | panel reset/init/window and FIFO pixel streaming |
-| `spi_stream_tx.v` | gapless mode-0 byte transmitter at 19.5 MHz |
+| `spi_stream_tx.v` | gapless mode-0 byte transmitter at 21.0 MHz |
 | `st7789_init_rom.v` | known-working panel initialization sequence |
 | `icebreaker.pcf` | display and camera pin assignments |
 | `timing_check.py` | clock, line-slack, and FIFO-burst calculations |
@@ -183,7 +189,7 @@ retained as references but are not included in the camera build.
 
 ## Bring-up checks
 
-1. Verify `cam_xclk` is approximately 19.500 MHz.
+1. Verify `cam_xclk` is approximately 21.000 MHz.
 2. Verify `cam_sioc` activity after reset and that the green LED eventually
    turns on.
 3. Verify `cam_pclk` is approximately 3.25 MHz during active video. A much

@@ -35,3 +35,18 @@ are not in the Makefile source list.
 16. Net effect: the same ~4.76% per-line timing margin and ~70-pixel FIFO
     peak are preserved, but nominal frame rate roughly doubles, from about
     4.06 fps to about 8.13 fps.
+
+## Follow-on: PLL raised to the verified timing ceiling
+
+17. The 39.00 MHz build left nextpnr-reported margin unused (43.40 MHz max).
+    Rebuilding at progressively higher `--freq` targets (42, 43.5, 45, 48 MHz)
+    showed 42.00 MHz (`DIVF=55`) is the highest step that reproducibly closes
+    timing -- verified with three clean rebuilds, each landing at 45.00 MHz
+    achieved. 43.5 MHz and above failed; nextpnr's placement search became
+    non-monotonic near the edge, so this was determined empirically rather
+    than assumed from the single 43.40 MHz data point.
+18. `SYS_CLK_HZ`/`SPI_HZ` raised to 42000000/21000000 and the Makefile `FREQ`
+    default to 42.00. Because OV7670 XCLK is also `sys_clk/2`, the camera
+    pixel rate and display drain rate scale together, so `CLKRC=/3` keeps the
+    same ~4.76% line margin without any further retuning.
+19. Net effect: nominal frame rate rises from about 8.13 fps to about 8.75 fps.

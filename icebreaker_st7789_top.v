@@ -4,17 +4,17 @@
 // icebreaker_st7789_top.v
 //
 // OV7670 -> 256x16 FIFO -> ST7789, no CPU and no external framebuffer.
-// The display wiring and 39.00 MHz PLL are retained from the working test
-// pattern project. SPI now runs at sys_clk/2 = 19.50 MHz (the fastest this
-// single-clock-domain SPI engine can generate), and the camera's CLKRC
-// divider was loosened to /3 to match -- roughly doubling frame rate over
-// the original 9.75 MHz / CLKRC=/6 pairing while keeping the same line-time
-// margin.
+// PLL raised from 39.00 to 42.00 MHz: nextpnr reported 43.40 MHz max at the
+// 39.00 MHz build, and 42.00 MHz reproducibly closes with 45.00 MHz max
+// (43.5 MHz and above failed to close). SPI runs at sys_clk/2 = 21.00 MHz
+// (the fastest this single-clock-domain SPI engine can generate) and the
+// camera XCLK is also sys_clk/2, so CLKRC=/3 keeps the same line-time
+// margin as before -- both rates scale together with sys_clk.
 // ============================================================================
 module icebreaker_st7789_top #(
     parameter integer USE_PLL        = 1,
-    parameter integer SYS_CLK_HZ     = 39000000,
-    parameter integer SPI_HZ         = 19500000,
+    parameter integer SYS_CLK_HZ     = 42000000,
+    parameter integer SPI_HZ         = 21000000,
     parameter integer POR_MS         = 10,
     parameter integer BL_ACTIVE_HIGH = 1
 )(
@@ -49,11 +49,11 @@ module icebreaker_st7789_top #(
     generate
         if (USE_PLL != 0) begin : g_pll
             wire pll_clk;
-            // 12 MHz * (51+1) / 2^4 = 39.00 MHz
+            // 12 MHz * (55+1) / 2^4 = 42.00 MHz
             SB_PLL40_PAD #(
                 .FEEDBACK_PATH("SIMPLE"),
                 .DIVR(4'b0000),
-                .DIVF(7'b0110011),
+                .DIVF(7'b0110111),
                 .DIVQ(3'b100),
                 .FILTER_RANGE(3'b001)
             ) pll (
@@ -100,7 +100,7 @@ module icebreaker_st7789_top #(
             cam_xclk_q <= ~cam_xclk_q;
     end
 
-    assign cam_xclk  = cam_xclk_q;  // 19.500 MHz
+    assign cam_xclk  = cam_xclk_q;  // 21.000 MHz
     assign cam_rst_n = resetn;
     assign cam_pwdn  = 1'b0;
 

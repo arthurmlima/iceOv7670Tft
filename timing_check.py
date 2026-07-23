@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Clock and rate-matching calculation for the OV7670/ST7789 design."""
 
-SYS_HZ = 39_000_000
-SPI_HZ = 19_500_000
+SYS_HZ = 42_000_000
+SPI_HZ = 21_000_000
 XCLK_HZ = SYS_HZ / 2
 CLKRC_DIV = 3
 CAM_INT_HZ = XCLK_HZ / CLKRC_DIV

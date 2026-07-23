@@ -14,14 +14,14 @@ valid step below the measured timing limit. The camera and SPI rates scale with 
 ```text
 12.000 MHz
     │
-    └─ SB_PLL40_PAD → 39.000 MHz system
-                         ├─ /2 SPI bit clock → 19.500 MHz ST7789 SCK
-                         └─ /2 toggle        → 19.500 MHz OV7670 XCLK
+    └─ SB_PLL40_PAD → 42.000 MHz system
+                         ├─ /2 SPI bit clock → 21.000 MHz ST7789 SCK
+                         └─ /2 toggle        → 21.000 MHz OV7670 XCLK
                                                    │
                                                    ├─ CLKRC /3
-                                                   │    = 6.500 MHz internal
+                                                   │    = 7.000 MHz internal
                                                    └─ QVGA PCLK /2
-                                                        ≈ 3.250 MHz
+                                                        = 3.500 MHz
 ```
 
 SPI now runs at sys_clk/2, the fastest bit rate this single-clock-domain SPI
@@ -56,18 +56,18 @@ Relevant OV7670 settings:
 Using 1568 camera internal-clock cycles per QVGA line:
 
 ```text
-camera line = 1568 / 6.500 MHz = 241.23 us
-panel line  = 280 × 16 / 19.500 MHz = 229.74 us
-margin      = 11.49 us per line
+camera line = 1568 / 7.000 MHz = 224.00 us
+panel line  = 280 × 16 / 21.000 MHz = 213.33 us
+margin      = 10.67 us per line
 ```
 
 The panel is slower than the camera during the active cropped burst but faster
 over the complete line. The FIFO rises by roughly 70 pixels during the retained
 active region and drains through horizontal blanking -- the same peak as
-before, since camera and display rates doubled together. A 256-pixel FIFO
-still provides more than 3× that expected peak.
+before, since camera and display rates scale together with sys_clk. A
+256-pixel FIFO still provides more than 3× that expected peak.
 
-The nominal frame rate is approximately 8.13 fps, based on scaling the
+The nominal frame rate is approximately 8.75 fps, based on scaling the
 preliminary 10 fps figure at an 8 MHz camera internal clock.
 
 ## Synchronization strategy
@@ -81,7 +81,7 @@ preliminary 10 fps figure at an 8 MHz camera internal clock.
 6. Capture and stream exactly 280×240 RGB565 pixels.
 7. Return to frame-wait state before the next VSYNC.
 
-All camera pins, including PCLK, are synchronized and sampled in the 39.00 MHz
+All camera pins, including PCLK, are synchronized and sampled in the 42.00 MHz
 system domain. PCLK is not used as an FPGA clock, avoiding an asynchronous FIFO.
 
 ## Fault detection
