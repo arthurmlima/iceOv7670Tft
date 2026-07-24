@@ -4,17 +4,30 @@
 // icebreaker_st7789_top.v
 //
 // OV7670 -> 256x16 FIFO -> ST7789, no CPU and no external framebuffer.
-// PLL raised from 39.00 to 42.00 MHz: nextpnr reported 43.40 MHz max at the
-// 39.00 MHz build, and 42.00 MHz reproducibly closes with 45.00 MHz max
-// (43.5 MHz and above failed to close). SPI runs at sys_clk/2 = 21.00 MHz
-// (the fastest this single-clock-domain SPI engine can generate) and the
-// camera XCLK is also sys_clk/2, so CLKRC=/3 keeps the same line-time
-// margin as before -- both rates scale together with sys_clk.
+// PLL stays at the original 39.00 MHz. Raising it to 42.00 MHz (see git
+// history) closes timing with the *old* SPI engine, but once the SPI engine
+// below was rebuilt with SB_IO DDR/NEG_TRIGGER cells, the added IO logic
+// shifted placement enough that the unrelated async BTN_N -> tft_cs path
+// (this design's recurring critical path) only cleared 42.00 MHz by 0.17%
+// margin -- reproducible, but too close to PVT variation to trust on real
+// hardware. 39.00 MHz with the new SPI engine reproducibly closes with
+// 43.25 MHz max (10.9% margin), so the PLL was left at the safe baseline
+// and all the speed gain was taken from the SPI/CLKRC changes instead.
+//
+// SPI now runs at a full sys_clk = 39.00 MHz (double the previous sys_clk/2
+// ceiling) via an SB_IO DDR output cell for SCLK plus NEG_TRIGGER cells for
+// MOSI/DC -- see spi_stream_tx.v. That headroom let the camera's CLKRC
+// divider tighten from /3 to /2 (CAM_INT_HZ = XCLK/2 = 9.75 MHz) while
+// *growing* the line-time margin from 4.76% to 28.6%, since display drain
+// rate doubled (from the DDR SPI engine) while the camera clock only grew
+// 1.5x. CLKRC=/1 (bypass) was checked and rejected: it makes the camera
+// faster than the display can drain even at this SPI rate, see
+// timing_check.py.
 // ============================================================================
 module icebreaker_st7789_top #(
     parameter integer USE_PLL        = 1,
-    parameter integer SYS_CLK_HZ     = 42000000,
-    parameter integer SPI_HZ         = 21000000,
+    parameter integer SYS_CLK_HZ     = 39000000,
+    parameter integer SPI_HZ         = 39000000,
     parameter integer POR_MS         = 10,
     parameter integer BL_ACTIVE_HIGH = 1
 )(
@@ -49,11 +62,11 @@ module icebreaker_st7789_top #(
     generate
         if (USE_PLL != 0) begin : g_pll
             wire pll_clk;
-            // 12 MHz * (55+1) / 2^4 = 42.00 MHz
+            // 12 MHz * (51+1) / 2^4 = 39.00 MHz
             SB_PLL40_PAD #(
                 .FEEDBACK_PATH("SIMPLE"),
                 .DIVR(4'b0000),
-                .DIVF(7'b0110111),
+                .DIVF(7'b0110011),
                 .DIVQ(3'b100),
                 .FILTER_RANGE(3'b001)
             ) pll (
@@ -100,7 +113,7 @@ module icebreaker_st7789_top #(
             cam_xclk_q <= ~cam_xclk_q;
     end
 
-    assign cam_xclk  = cam_xclk_q;  // 21.000 MHz
+    assign cam_xclk  = cam_xclk_q;  // 19.500 MHz
     assign cam_rst_n = resetn;
     assign cam_pwdn  = 1'b0;
 
@@ -185,6 +198,8 @@ module icebreaker_st7789_top #(
     );
 
     // ---------------- ST7789 camera stream ----------------
+    wire tft_sclk_d0, tft_sclk_d1, tft_mosi_bit, tft_dc_bit;
+
     st7789_camera_ctrl #(
         .CLK_HZ     (SYS_CLK_HZ),
         .SPI_HZ     (SPI_HZ),
@@ -202,16 +217,55 @@ module icebreaker_st7789_top #(
         .fifo_rd_data  (fifo_rd_data),
         .fifo_rd_valid (fifo_rd_valid),
         .fifo_rd_en    (fifo_rd_en),
-        .tft_sclk      (tft_scl),
-        .tft_mosi      (tft_sda),
+        .tft_sclk_d0   (tft_sclk_d0),
+        .tft_sclk_d1   (tft_sclk_d1),
+        .tft_mosi_bit  (tft_mosi_bit),
         .tft_cs_n      (tft_cs),
-        .tft_dc        (tft_dc),
+        .tft_dc_bit    (tft_dc_bit),
         .tft_resn      (tft_res),
         .tft_bl        (bl_raw),
         .init_done     (lcd_init_done),
         .frame_done    (lcd_frame_done),
         .sync_error    (lcd_sync_error),
         .stream_active (lcd_stream_active)
+    );
+
+    // SCLK = clk_sys via an SB_IO DDR output cell: D_OUT_0 (rising-clk
+    // phase) pulses high while spi_stream_tx is sending a bit, D_OUT_1
+    // (falling-clk phase) is tied low so every bit gets its own discrete
+    // pulse instead of a stretched-out one across a multi-bit burst.
+    SB_IO #(
+        .PIN_TYPE (6'b010000),
+        .PULLUP   (1'b0)
+    ) tft_sclk_io (
+        .PACKAGE_PIN (tft_scl),
+        .OUTPUT_CLK  (clk_sys),
+        .D_OUT_0     (tft_sclk_d0),
+        .D_OUT_1     (tft_sclk_d1)
+    );
+
+    // MOSI/DC = registered on clk_sys's falling edge (NEG_TRIGGER), giving
+    // a half clk_sys-cycle setup margin ahead of the SCLK rising edge that
+    // samples them. Verified in simulation against the SB_IO behavioral
+    // model -- see spi_stream_tx.v.
+    SB_IO #(
+        .PIN_TYPE    (6'b010100),
+        .NEG_TRIGGER (1'b1),
+        .PULLUP      (1'b0)
+    ) tft_mosi_io (
+        .PACKAGE_PIN (tft_sda),
+        .OUTPUT_CLK  (clk_sys),
+        .D_OUT_0     (tft_mosi_bit)
+    );
+
+    SB_IO #(
+        .PIN_TYPE    (6'b010100),
+        .NEG_TRIGGER (1'b1),
+        .PULLUP      (1'b0)
+    ) tft_dc_io (
+        .PACKAGE_PIN (tft_dc),
+        .OUTPUT_CLK  (clk_sys),
+        .D_OUT_0     (tft_dc_bit)
     );
 
     assign tft_blk = BL_ACTIVE_HIGH ? bl_raw : ~bl_raw;

@@ -18,34 +18,47 @@ constant SPI drain rate.
 
 ## Clock plan
 
-The display architecture is retained, with the PLL raised as far as nextpnr
-reproducibly closes timing:
+The PLL is at 39.00 MHz -- the frequency this design reproducibly closes
+timing on with real margin. Speed came instead from rebuilding the SPI
+engine to run at a full system-clock rate rather than half of it, and then
+using that headroom to tighten the camera's pixel clock:
 
 | Clock | Value | Source |
 |---|---:|---|
 | Board oscillator | 12.000 MHz | iCEBreaker |
-| FPGA system clock | 42.000 MHz | `SB_PLL40_PAD` |
-| ST7789 SCLK | 21.000 MHz | system clock / 2 |
-| OV7670 XCLK | 21.000 MHz | system clock / 2 |
-| OV7670 internal clock | 7.000 MHz | XCLK / 3, `CLKRC=0x02` |
-| OV7670 PCLK | 3.500 MHz | QVGA scaling, PCLK / 2 |
+| FPGA system clock | 39.000 MHz | `SB_PLL40_PAD` |
+| ST7789 SCLK | 39.000 MHz | system clock (DDR SPI engine) |
+| OV7670 XCLK | 19.500 MHz | system clock / 2 |
+| OV7670 internal clock | 9.750 MHz | XCLK / 2, `CLKRC=0x01` |
+| OV7670 PCLK | 4.875 MHz | QVGA scaling, PCLK / 2 |
 
-The PLL settings are `DIVR=0`, `DIVF=55`, `DIVQ=4`, and
-`FILTER_RANGE=1`, which produce 42.00 MHz from 12 MHz. nextpnr reported a
-43.40 MHz limit for the previous 39.00 MHz build; 42.00 MHz was verified to
-close timing reproducibly (three clean rebuilds, 45.00 MHz achieved each
-time). Targets from 43.5 MHz up failed to close -- nextpnr's placement search
-gets non-monotonic that close to the edge, so 42.00 MHz is treated as the
-practical ceiling for this netlist rather than something derived from a
-formula.
+The PLL settings are `DIVR=0`, `DIVF=51`, `DIVQ=4`, `FILTER_RANGE=1`. Raising
+the PLL itself was tried (42.00 MHz survived on its own with 45.00 MHz max),
+but once the SPI engine below was rebuilt with SB_IO DDR/NEG_TRIGGER cells,
+the extra IO logic shifted placement enough that 42.00 MHz only closed with a
+0.17% margin -- reproducible, but too close to real-hardware PVT variation to
+trust. 39.00 MHz with the new SPI engine closes with 43.25 MHz max (10.9%
+margin), so the PLL stayed at the safe baseline and the win came from the SPI
+engine and `CLKRC` instead.
 
-SPI runs at system clock / 2, the fastest bit rate `spi_stream_tx` can
-generate in a single clock domain (each SCLK half-period needs at least one
-`clk_sys` cycle). Since OV7670 XCLK is also system clock / 2, raising the
-system clock scales both the camera's pixel rate and the display's drain rate
-together, so the line-time safety margin below is unchanged from the 39 MHz
-build. Pushing `CLKRC` past /3 (or `SPI_HZ` past system clock / 2) independent
-of that scaling would erase the margin -- see the proof below.
+`spi_stream_tx` previously needed two `clk_sys` cycles per SPI bit (one to
+raise SCLK, one to lower it -- the fastest a plain single-edge toggle
+register can do). It's now built from an `SB_IO` DDR output cell for SCLK
+(one discrete high-then-low pulse per `clk_sys` cycle) plus `NEG_TRIGGER`
+registered cells for MOSI/DC, giving each data bit a half-`clk_sys`-cycle
+setup margin ahead of the SCLK edge that samples it -- the same relationship
+the old design got from a full spare cycle, just compressed into DDR/negedge
+timing instead of an extra FSM cycle. This phase relationship was verified in
+simulation against the real iCE40 `SB_IO` behavioral model (not just derived
+by hand) before being trusted on hardware, including checking `tx_done`
+can't let CS cut off the last bit's pulse mid-transmission.
+
+Doubling the display's drain rate this way let `CLKRC` tighten from /3 to /2.
+`CLKRC=/1` (bypass) was also checked and rejected -- it makes the camera
+faster than the display can drain even at the new SPI rate. Since
+`CAM_INT_HZ = sys_clk/4` and `SPI_HZ = sys_clk` at the chosen settings, the
+line-time margin ratio is scale-invariant with `sys_clk`: raising or lowering
+the PLL later won't need `CLKRC` retuned, only the numbers in the proof below.
 
 ## Line-rate proof
 
@@ -53,18 +66,21 @@ Using the OV7670 QVGA timing assumption from the preliminary design
 (1568 internal-clock cycles per line):
 
 ```text
-camera line time = 1568 / 7.000 MHz = 224.00 us
-display line time = 280 × 16 / 21.000 MHz = 213.33 us
-line slack        = 10.67 us = 4.76%
+camera line time = 1568 / 9.750 MHz = 160.82 us
+display line time = 280 × 16 / 39.000 MHz = 114.87 us
+line slack        = 45.95 us = 28.6%
 ```
 
-The center crop retains camera columns 20 through 299. During active video the
-FIFO rises by about 70 pixels and then drains during the remaining camera line
-time. A 256-pixel FIFO therefore gives substantial margin without spending a
-framebuffer's worth of EBRs.
+The center crop retains camera columns 20 through 299. With the display now
+draining faster than before, the active-video input and output pixel rates
+work out algebraically equal (`CAM_INT_HZ/4 == SPI_HZ/16`), so the FIFO
+barely moves during the retained active region instead of the roughly
+70-pixel peak of the previous (sys_clk/2 SPI) build. The 256-pixel FIFO is
+now far larger than steady-state margin requires but costs nothing extra to
+keep.
 
-The expected frame rate is approximately 8.75 fps if the preliminary design's
-10 fps at an 8 MHz internal camera clock scales linearly.
+The expected frame rate is approximately 12.19 fps if the preliminary
+design's 10 fps at an 8 MHz internal camera clock scales linearly.
 
 Run:
 
@@ -159,7 +175,7 @@ make
 make prog
 ```
 
-The build targets `up5k-sg48` and asks nextpnr to close timing at 42.00 MHz.
+The build targets `up5k-sg48` and asks nextpnr to close timing at 39.00 MHz.
 
 ## Status LEDs and reset
 
@@ -175,11 +191,11 @@ The backlight remains off until panel initialization completes.
 | File | Function |
 |---|---|
 | `icebreaker_st7789_top.v` | PLL, reset, XCLK, SCCB I/O, integration, LEDs |
-| `cam_init.v` | OV7670 SCCB register sequence with `/6` clock setting |
+| `cam_init.v` | OV7670 SCCB register sequence with `/2` clock setting |
 | `cam_capture.v` | synchronized PCLK sampling, RGB565 assembly, 320→280 crop |
 | `pixel_fifo.v` | 256×16 single-clock rate-matching FIFO |
 | `st7789_camera_ctrl.v` | panel reset/init/window and FIFO pixel streaming |
-| `spi_stream_tx.v` | gapless mode-0 byte transmitter at 21.0 MHz |
+| `spi_stream_tx.v` | gapless mode-0 byte transmitter, DDR SCLK at 39.0 MHz |
 | `st7789_init_rom.v` | known-working panel initialization sequence |
 | `icebreaker.pcf` | display and camera pin assignments |
 | `timing_check.py` | clock, line-slack, and FIFO-burst calculations |
@@ -189,20 +205,38 @@ retained as references but are not included in the camera build.
 
 ## Bring-up checks
 
-1. Verify `cam_xclk` is approximately 21.000 MHz.
+1. Verify `cam_xclk` is approximately 19.500 MHz.
 2. Verify `cam_sioc` activity after reset and that the green LED eventually
    turns on.
-3. Verify `cam_pclk` is approximately 3.25 MHz during active video. A much
+3. Verify `cam_pclk` is approximately 4.875 MHz during active video. A much
    higher value usually means `CLKRC` or `DBLV` did not take effect.
-4. If the image colors are byte-swapped, change
+4. Verify `tft_scl` (SCLK) is a clean ~39 MHz square wave while streaming,
+   with no runt/merged pulses -- this is the first place a DDR phase mistake
+   would show up. If the panel shows garbled or shifted color data instead of
+   a recognizable (if unsynced) image, suspect the SCLK/MOSI/DC DDR timing in
+   `spi_stream_tx.v` before anything else; the previous sys_clk/2 SPI engine
+   (see git history) is the known-good fallback if this needs to be ruled out.
+5. If the image colors are byte-swapped, change
    `{hi_byte, d_s1}` to `{d_s1, hi_byte}` in `cam_capture.v`.
-5. If the image is mirrored or upside down, try ST7789 `MADCTL=0x60` or adjust
+6. If the image is mirrored or upside down, try ST7789 `MADCTL=0x60` or adjust
    OV7670 `MVFP` register `0x1E`.
-6. If the red LED turns on, probe XCLK/PCLK first; the design depends on the
-   camera accepting `CLKRC=0x02` and `DBLV=0x0A`.
+7. If the red LED turns on, probe XCLK/PCLK first; the design depends on the
+   camera accepting `CLKRC=0x01` and `DBLV=0x0A`.
 
 ## Verification note
 
 The RTL is organized for yosys/nextpnr and has been statically reviewed in this
 package. Run `make` on the target toolchain to confirm synthesis, EBR inference,
 pin placement, and final timing on the installed tool versions.
+
+The DDR SPI engine in `spi_stream_tx.v` additionally has behavior-level
+verification: a testbench (not included in this package) instantiated it
+alongside the real iCE40 `SB_IO` behavioral model from
+`yosys/ice40/cells_sim.v` and confirmed bit-exact byte transmission, correct
+per-byte DC latching, gapless multi-byte bursts, discrete (non-merged) SCLK
+pulses, and a real half-`clk_sys`-cycle (~12.8 ns at 39 MHz) setup margin on
+MOSI/DC ahead of each sampling edge. That covers logical correctness and
+relative timing margin -- it does not substitute for confirming the panel
+renders a real image on actual hardware, since board-level trace lengths,
+connector quality, and the ST7789 unit's actual (not just datasheet-typical)
+setup-time tolerance are outside what simulation can see.

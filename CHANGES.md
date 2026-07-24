@@ -50,3 +50,32 @@ are not in the Makefile source list.
     pixel rate and display drain rate scale together, so `CLKRC=/3` keeps the
     same ~4.76% line margin without any further retuning.
 19. Net effect: nominal frame rate rises from about 8.13 fps to about 8.75 fps.
+
+## Follow-on: DDR SPI engine, PLL reverted, CLKRC tightened (superseded above)
+
+20. `spi_stream_tx.v` was rebuilt around an `SB_IO` DDR output cell for SCLK
+    (one discrete pulse per `clk_sys` cycle instead of one pulse per two
+    cycles) plus `NEG_TRIGGER`-registered cells for MOSI/DC, doubling SPI
+    from sys_clk/2 to a full sys_clk. This is a real hardware-timing change
+    (not just a divider tweak), so it was verified in simulation against the
+    actual iCE40 `SB_IO` behavioral model from `cells_sim.v` before touching
+    the real design -- confirming bit-exact byte transmission, correct
+    per-byte DC latching, discrete (non-merged) SCLK pulses, and that
+    `tx_done` can't let CS cut off the last bit's pulse mid-transmission.
+21. Building the DDR engine into the design changed placement pressure on
+    the unrelated async BTN_N -> `tft_cs` critical path (this design's
+    recurring bottleneck). At 42.00 MHz (item 17-18 above) that path only
+    closed with a 0.17% margin -- reproducible, but far too close to real
+    PVT variation to trust. `SYS_CLK_HZ`/`SPI_HZ` were reverted to
+    39000000/39000000 (Makefile `FREQ` back to 39.00), which reproducibly
+    closes with 43.25 MHz max (10.9% margin) with the new SPI engine in
+    place.
+22. With SPI now twice as fast, `cam_init.v`'s `CLKRC` was tightened from
+    `0x02` (/3) to `0x01` (/2) at both table locations. `CLKRC=0x00`
+    (bypass, /1) was checked and rejected: even at the new SPI rate the
+    camera would outrun the display. Because `CAM_INT_HZ = sys_clk/4` and
+    `SPI_HZ = sys_clk` at these settings, the line-time margin is *larger*
+    than before (4.76% -> 28.6%) even though the camera clock also grew.
+23. Net effect: nominal frame rate rises from about 8.75 fps to about
+    12.19 fps -- roughly 1.5x from `CLKRC`, on top of the DDR SPI engine
+    that made the `CLKRC` change safe to make at all. See `timing_check.py`.

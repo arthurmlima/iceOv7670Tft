@@ -2,7 +2,7 @@ TOP      := icebreaker_st7789_top
 PCF      := icebreaker.pcf
 DEVICE   := up5k
 PACKAGE  := sg48
-FREQ     := 42.00
+FREQ     := 39.00
 
 SOURCES  := icebreaker_st7789_top.v \
             cam_init.v cam_capture.v pixel_fifo.v \

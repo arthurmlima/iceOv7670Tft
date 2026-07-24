@@ -32,10 +32,11 @@ module st7789_camera_ctrl #(
     input  wire        fifo_rd_valid,
     output reg         fifo_rd_en,
 
-    output wire        tft_sclk,
-    output wire        tft_mosi,
+    output wire        tft_sclk_d0,
+    output wire        tft_sclk_d1,
+    output wire        tft_mosi_bit,
     output wire        tft_cs_n,
-    output wire        tft_dc,
+    output wire        tft_dc_bit,
     output reg         tft_resn,
     output reg         tft_bl,
 
@@ -44,8 +45,9 @@ module st7789_camera_ctrl #(
     output reg         sync_error,
     output wire        stream_active
 );
-    localparam integer HALF_DIV = (CLK_HZ/(2*SPI_HZ) < 1) ?
-                                  1 : CLK_HZ/(2*SPI_HZ);
+    // SPI runs at one bit per clk_sys cycle via the DDR engine in
+    // spi_stream_tx (SPI_HZ = CLK_HZ); the SPI_HZ parameter is kept only so
+    // callers/docs can state the rate explicitly.
     localparam integer MS_DIV   = (CLK_HZ/1000 < 2) ? 2 : CLK_HZ/1000;
     localparam integer MSW      = $clog2(MS_DIV);
     localparam integer NPIX     = WIDTH * HEIGHT;
@@ -133,7 +135,7 @@ module st7789_camera_ctrl #(
     wire       tx_done;
     wire       tx_busy;
 
-    spi_stream_tx #(.HALF_DIV(HALF_DIV)) spi (
+    spi_stream_tx spi (
         .clk       (clk),
         .resetn    (resetn),
         .tx_valid  (tx_valid),
@@ -142,9 +144,10 @@ module st7789_camera_ctrl #(
         .tx_ready  (tx_ready),
         .tx_accept (tx_accept),
         .tx_done   (tx_done),
-        .sclk      (tft_sclk),
-        .mosi      (tft_mosi),
-        .dc        (tft_dc),
+        .sclk_d0   (tft_sclk_d0),
+        .sclk_d1   (tft_sclk_d1),
+        .mosi_bit  (tft_mosi_bit),
+        .dc_bit    (tft_dc_bit),
         .busy      (tx_busy)
     );
 
