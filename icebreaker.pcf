@@ -6,6 +6,10 @@ set_io -nowarn BTN_N 10
 set_io -nowarn LEDR_N 11
 set_io -nowarn LEDG_N 37
 
+# Snap-off buttons: active-high with external pull-downs
+set_io -nowarn BTN1 20   # P2_9:  request encryption
+set_io -nowarn BTN3 18   # P2_10: request bypass
+
 # ----------------------------------------------------------------------
 # ST7789: keep the existing known-working six display signals on PMOD 2
 # ----------------------------------------------------------------------
@@ -42,5 +46,4 @@ set_io -nowarn cam_d[4] 42   # P1B7
 set_io -nowarn cam_d[5] 36   # P1B8
 set_io -nowarn cam_d[6] 32   # P1B9
 set_io -nowarn cam_d[7] 28   # P1B10
-
 
