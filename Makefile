@@ -5,7 +5,8 @@ PACKAGE  := sg48
 FREQ     := 39.00
 
 SOURCES  := icebreaker_st7789_top.v \
-            cam_init.v cam_capture.v pixel_fifo.v \
+            cam_init.v cam_capture.v frame_stream_gate.v \
+            pixel_xor_stage.v xormap_32.v pixel_fifo.v \
             st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
 
 all: $(TOP).bin

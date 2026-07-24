@@ -9,6 +9,7 @@ constant SPI drain rate.
 
 ```text
 OV7670 RGB565 → center-crop 320×240 to 280×240
+              → optional frame-seeded XOR-map stage
               → 256×16 synchronous FIFO (one iCE40 EBR)
               → ST7789 RAMWR stream
 ```
@@ -24,6 +25,9 @@ Top-level entity: **`icebreaker_st7789_top`** (`icebreaker_st7789_top.v`).
 | `icebreaker_st7789_top.v` | Top level: PLL, POR/reset, camera XCLK, SCCB pin, integration, SB_IO pin cells, status LEDs |
 | `cam_init.v` | OV7670 SCCB (I²C-like) master — writes the register table on power-up |
 | `cam_capture.v` | Synchronizes PCLK/HREF/VSYNC, assembles RGB565 bytes, crops 320→280 columns |
+| `frame_stream_gate.v` | Atomically accepts a frame only when the display is ready; drops busy-time frames without flushing/mixing FIFO data |
+| `pixel_xor_stage.v` | Per-frame seed generator, frame-safe bypass mux, and pixel/XOR-map integration |
+| `xormap_32.v` | Iterative 32-bit XOR map with a 16-bit folded output |
 | `pixel_fifo.v` | 256×16 single-clock rate-matching FIFO (infers one iCE40 EBR) |
 | `st7789_camera_ctrl.v` | ST7789 reset/init/address-window FSM, streams FIFO pixels into RAMWR |
 | `st7789_init_rom.v` | Combinational ROM: the known-working ST7789 register-init sequence (shared by both the camera build and the reference test-pattern build) |
@@ -72,6 +76,11 @@ icebreaker_st7789_top                        (PLL, POR/reset, XCLK gen, LEDs, pi
 ├─ cam_capture  "capture"                     RGB565 capture / crop / frame-sync
 │    (enable = stream_enable = cam_cfg_done && lcd_init_done)
 │
+├─ frame_stream_gate  "frame_gate"             accept ready frames / drop busy frames
+│
+├─ pixel_xor_stage  "encryption"               optional frame-seeded pixel XOR
+│    └─ xormap_32  "map"                       iterative 32-bit XOR map
+│
 ├─ pixel_fifo  "fifo"                         256×16 rate-matching FIFO
 │
 ├─ st7789_camera_ctrl  "display"               ST7789 reset/init/window/pixel-stream FSM
@@ -113,9 +122,16 @@ flowchart LR
     CAM -- "cam_d[7:0], pclk, href, vsync" --> CAP["cam_capture\n(sync, RGB565 assemble,\n320→280 crop)"]
     EN -. enable .-> CAP
 
-    CAP -- "pix_data[15:0], pix_wr" --> FIFO["pixel_fifo\n256×16 (1 EBR)"]
-    CAP -- frame_sync --> FIFO
-    CAP -- frame_sync --> CTRL
+    CAP -- "pix_wr + frame_sync" --> GATE["frame_stream_gate\naccept only when LCD ready"]
+    CTRL -. stream_active .-> GATE
+    BTN1["BTN1\nrequest encryption"] --> ENC
+    BTN3["BTN3\nrequest bypass"] --> ENC
+    CAP -- "pix_data[15:0]" --> ENC["pixel_xor_stage\nframe seed + XOR/bypass"]
+    GATE -- "accepted pixel valid" --> ENC
+    ENC -- "pixel[15:0], valid" --> FIFO["pixel_fifo\n256×16 (1 EBR)"]
+    CAP -- frame_sync --> ENC
+    GATE -- "accepted frame_sync" --> FIFO
+    GATE -- "accepted frame_sync" --> CTRL
 
     FIFO -- "rd_data[15:0], rd_valid" --> CTRL["st7789_camera_ctrl\n(reset/init/window FSM)"]
     ROM["st7789_init_rom"] --> CTRL
@@ -133,9 +149,10 @@ flowchart LR
     FAULT --> LEDR["LEDR_N\n(red = fault)"]
 ```
 
-Everything runs in the single `clk_sys` (39.00 MHz) domain — `cam_pclk` is
-sampled as synchronized *data*, never used as a clock, so there is no
-asynchronous clock-domain crossing anywhere in the design.
+The camera/display datapath runs entirely in the single `clk_sys` (39.00 MHz)
+domain — `cam_pclk` is sampled as synchronized *data*, never used as an RTL
+clock. The asynchronous BTN1/BTN3 controls each pass through a two-flop
+synchronizer before entering the frame-control logic.
 
 ---
 
@@ -252,6 +269,41 @@ to recompute all of the numbers above from the live clock parameters.
 - ST7789 hardware reset timing and init register sequence are retained
   byte-for-byte from the working display-only project.
 
+### Frame-seeded XOR-map stage
+
+For an accepted encrypted frame, the accepted `cam_capture.pix_wr` strobe
+advances `xormap_32` exactly once per retained RGB565 pixel. In bypass mode
+the map does not load or advance. The accepted-frame pulse loads a new 32-bit
+seed before the first pixel. The seed generator is a nonzero 32-bit LFSR
+stepped once per accepted frame, so it produces a deterministic pseudo-random
+seed sequence from `XORMAP_INITIAL_SEED`; it is not a hardware true-random
+generator.
+
+The runtime mode is frame-safe: BTN1 requests encryption, BTN3 requests
+bypass, and BTN3 wins if both are pressed. A request made during a frame takes
+effect on the next accepted frame boundary, never partway through the current
+image. Reset returns to `ENCRYPTION_DEFAULT` (default `0`, bypass). Setting
+the top-level `ENABLE_XORMAP` parameter to `0` makes the encryption stage a
+hard pass-through and allows synthesis to remove the map.
+
+`frame_stream_gate` prevents spatial mixing when camera/display timing slips.
+If a new camera frame arrives while the LCD controller is still streaming,
+the FIFO is left intact so the old transfer can finish and every pixel from
+the new frame is suppressed. The next frame arriving while the LCD is idle is
+accepted, flushes stale FIFO contents, and starts a complete new display
+window. A rejected frame sets the sticky red fault LED.
+
+If a genuine camera fault produces an incomplete accepted frame, the LCD
+controller can remain waiting for its missing pixels. Use `BTN_N` to recover
+from that persistent red-LED condition; ordinary busy-frame rejection
+recovers automatically at the next ready frame.
+
+There is no decryptor after the FIFO, so the display intentionally shows
+scrambled RGB565 values while the stage is enabled. This XOR map is a linear,
+32-bit visual scrambler, not a cryptographically secure cipher; applications
+requiring confidentiality should use a reviewed cipher and proper key/nonce
+management.
+
 Key OV7670 register deltas from the stock reference table (full table in
 `cam_init.v`):
 
@@ -319,6 +371,8 @@ build actually uses), not from board silkscreen labels:
 |---|---:|---|
 | `CLK` (board osc) | 35 | — |
 | `BTN_N` | 10 | — |
+| `BTN1` (encryption request, active high) | 20 | P2_9 |
+| `BTN3` (bypass request, active high) | 18 | P2_10 |
 | `LEDR_N` | 11 | — |
 | `LEDG_N` | 37 | — |
 | **ST7789** `tft_scl` (SCK) | 27 | P2B1 |
@@ -340,6 +394,10 @@ build actually uses), not from board silkscreen labels:
 `cam_siod` is open-drain and uses the FPGA's internal pull-up (`SB_IO`
 `PULLUP=1`); a short external 4.7 kΩ pull-up to 3.3 V may help if SCCB
 wiring is long. `cam_sioc` is push-pull.
+
+BTN1/BTN3 are the active-high snap-off buttons with external pull-downs.
+BTN2 is not available for this feature because its pin 19 is already used by
+`tft_dc`.
 
 > **Note:** an earlier draft of this document described the display on
 > PMOD 1B and the camera on PMOD 1A/2 with different pin numbers than the
@@ -368,7 +426,8 @@ The build targets `up5k-sg48` and asks nextpnr to close timing at 39.00 MHz
 
 ```text
 icebreaker_st7789_top.v
-cam_init.v cam_capture.v pixel_fifo.v
+cam_init.v cam_capture.v frame_stream_gate.v
+pixel_xor_stage.v xormap_32.v pixel_fifo.v
 st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
 ```
 
@@ -379,10 +438,13 @@ st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
 - **Green LED on** — both initializers finished (`stream_enable`: SCCB
   camera config done **and** ST7789 init done).
 - **Red LED on** — sticky fault: FIFO overflow, FIFO underflow, or a new
-  camera frame arriving before the previous panel transfer completed
-  (`lcd_sync_error`). Stays latched until reset.
+  camera frame being rejected because the previous panel transfer has not
+  completed. Stays latched until reset.
 - **User button (`BTN_N`)** — full camera and panel reset/reinitialization
   (also gated by `pll_lock` and a POR counter on power-up).
+- **BTN1** — request XOR-map encryption; applies at the next frame boundary.
+- **BTN3** — request bypass; applies at the next frame boundary and has
+  priority over BTN1.
 - **Backlight (`tft_blk`)** — driven low (off) through the hardware reset
   pulse, then turned on by `st7789_camera_ctrl` as soon as the init FSM
   finishes walking `st7789_init_rom` (before the first frame streams, but
@@ -420,11 +482,19 @@ st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
 
 ## 11. Verification status
 
-The RTL is organized for `yosys`/`nextpnr` and has been statically reviewed
-in this package. Run `make` on the target toolchain to confirm synthesis,
-EBR inference, pin placement, and final timing on the installed tool
-versions (this environment does not have `yosys`/`nextpnr-ice40`/`icepack`
-installed, so that step has not been re-run here).
+The integrated design has been synthesized, placed, routed, and packed with
+the installed OSS CAD Suite. Yosys reports 623 `SB_LUT4` cells and three
+`SB_RAM40_4K` blocks. Six nextpnr seeds all pass the 39.00 MHz constraint;
+their final maximum-frequency estimates range from 43.52 to 46.10 MHz, and
+the routed design uses 847/5280 logic cells (16%).
+
+Behavioral tests exercised a complete rejected 280×240 frame (all 67,200
+pixel strobes suppressed without altering the retained FIFO/map state) and
+336,156 frame-path checks in total. A separate exhaustive bypass test
+confirmed that all 65,536 RGB565 values and their valid strobes pass
+bit-for-bit while the XOR map remains idle. Hard-bypass synthesis with
+`ENABLE_XORMAP=0` also completed and reduced the design to 496 `SB_LUT4`
+cells.
 
 The DDR SPI engine in `spi_stream_tx.v` additionally has behavior-level
 verification: a testbench (not included in this package) instantiated it
