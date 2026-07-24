@@ -13,8 +13,8 @@
 //
 // A 3-phase write is {0x42, reg, val} = 27 clocked bits at ~100 kHz, one
 // register per ~290 us, with a 2 ms gap between writes and a 10 ms gap after
-// each COM7 soft reset. Whole table ~150 ms - long done before the ST7789
-// finishes its own (~500 ms) init.
+// each COM7 soft reset. Whole table (118 entries) ~290 ms - still long done
+// before the ST7789 finishes its own (~500 ms) init.
 //
 // ---------------------------------------------------------------------------
 // Register table = the proven camera.h set, with exactly these deltas:
@@ -28,8 +28,11 @@
 //   RGB444 0x03 -> 0x00  RGB444 OFF  \  the old table left the sensor in
 //   COM15  0xF0 -> 0xD0  true RGB565 /  444/555 mode; the panel needs 565
 //
-// Everything else (gamma, AWB, color matrix, windowing, the magic reserved
-// registers) is carried over verbatim from the working configuration.
+// Color matrix and windowing/scaling registers are carried over verbatim
+// from the working configuration. Gamma, AWB tuning, AEC/banding
+// parameters, COM8, and pixel correction/edge enhancement were never
+// programmed by the original table (left at chip reset defaults) and are
+// now an added block at the end of the ROM -- see the comments there.
 // ============================================================================
 
 module cam_init #(
@@ -47,7 +50,7 @@ module cam_init #(
 
     // ---------------- register ROM ----------------
     function [15:0] rom;
-        input [5:0] i;
+        input [6:0] i;
         begin
             case (i)
                 6'd0 :  rom = 16'h1280;  // COM7   soft reset
@@ -111,12 +114,102 @@ module cam_init #(
                 6'd58:  rom = 16'h7211;  // SCALING_DCWCTR /2  | QVGA       [added]
                 6'd59:  rom = 16'h73F1;  // SCALING_PCLK_DIV/2 |            [added]
                 6'd60:  rom = 16'hA202;  // SCALING_PCLK_DELAY /            [added]
+
+                // ---- image-quality tuning block, added -----------------
+                // Verbatim/standard values from the widely-deployed Linux
+                // kernel ov7670 driver's default register set (the closest
+                // thing to a vetted-in-production OV7670 tuning reference),
+                // restricted to registers orthogonal to the QVGA/RGB565/
+                // timing setup above -- nothing here touches CLKRC, COM7,
+                // COM3, COM14, the window/scaling registers, or DBLV, all
+                // of which are load-bearing for this design's pixel-clock
+                // and line-timing budget (see README.md).
+
+                // AEC operating region + banding-filter parameters, set
+                // before COM8 turns the auto-exposure loop on below.
+                7'd61:  rom = 16'h2495;  // AEW     AEC/AGC stable region, upper limit
+                7'd62:  rom = 16'h2533;  // AEB     AEC/AGC stable region, lower limit
+                7'd63:  rom = 16'h26E3;  // VPT     fast-mode large-step threshold
+                7'd64:  rom = 16'h3B03;  // COM11   EXP | HZAUTO: night mode + auto 50/60 Hz banding detect
+                7'd65:  rom = 16'hA505;  // BD50MAX max banding step, 50 Hz
+                7'd66:  rom = 16'hAB07;  // BD60MAX max banding step, 60 Hz
+                7'd67:  rom = 16'h9F78;  // HAECC1
+                7'd68:  rom = 16'hA068;  // HAECC2
+                7'd69:  rom = 16'hA103;  // reserved, paired with HAECC1/2
+                7'd70:  rom = 16'hA6D8;  // HAECC3
+                7'd71:  rom = 16'hA7D8;  // HAECC4
+                7'd72:  rom = 16'hA8F0;  // HAECC5
+                7'd73:  rom = 16'hA990;  // HAECC6
+                7'd74:  rom = 16'hAA94;  // HAECC7
+
+                // Enable AGC/AEC/AWB now that their operating parameters
+                // are programmed: fast algorithm, unlimited AEC step,
+                // banding filter, AGC, AEC, AWB all on. Previously COM8 was
+                // never written, leaving it at its post-reset default.
+                7'd75:  rom = 16'h13FF;  // COM8    FASTAEC|AECSTEP|BFILT|AGC|AEC|AWB
+
+                // AWB tuning block. The OV7670's default/untuned AWB is the
+                // classic source of the purple/magenta color cast this
+                // sensor is known for; this block plus COM16 below is the
+                // standard fix.
+                7'd76:  rom = 16'h0140;  // BLUE    initial blue channel gain (AWB adjusts from here)
+                7'd77:  rom = 16'h0260;  // RED     initial red channel gain
+                7'd78:  rom = 16'h430A;
+                7'd79:  rom = 16'h44F0;
+                7'd80:  rom = 16'h4534;
+                7'd81:  rom = 16'h4658;
+                7'd82:  rom = 16'h4728;
+                7'd83:  rom = 16'h483A;
+                7'd84:  rom = 16'h5988;
+                7'd85:  rom = 16'h5A88;
+                7'd86:  rom = 16'h5B44;
+                7'd87:  rom = 16'h5C67;
+                7'd88:  rom = 16'h5D49;
+                7'd89:  rom = 16'h5E0E;
+                7'd90:  rom = 16'h6C0A;
+                7'd91:  rom = 16'h6D55;
+                7'd92:  rom = 16'h6E11;
+                7'd93:  rom = 16'h6F9F;
+                7'd94:  rom = 16'h6A40;
+                7'd95:  rom = 16'h4138;  // COM16   AWB gain enable -- required for the block above to take effect
+
+                // Pixel correction / edge enhancement: REG76 in particular
+                // suppresses the salt-and-pepper white/black pixel noise
+                // this sensor shows without it.
+                7'd96:  rom = 16'h3F00;  // EDGE    edge enhancement factor (auto)
+                7'd97:  rom = 16'h7505;  // edge enhancement lower limit
+                7'd98:  rom = 16'h76E1;  // REG76   white/black pixel correction enable
+                7'd99:  rom = 16'h4B09;
+                7'd100: rom = 16'h7701;
+                7'd101: rom = 16'hC960;
+
+                // Gamma curve (GAM1..GAM15 + SLOP, 0x7A-0x89). Left
+                // entirely at chip reset defaults before this change; a
+                // flat/uncorrected gamma curve reads as low-contrast,
+                // washed-out video.
+                7'd102: rom = 16'h7A20;
+                7'd103: rom = 16'h7B10;
+                7'd104: rom = 16'h7C1E;
+                7'd105: rom = 16'h7D35;
+                7'd106: rom = 16'h7E5A;
+                7'd107: rom = 16'h7F69;
+                7'd108: rom = 16'h8076;
+                7'd109: rom = 16'h8180;
+                7'd110: rom = 16'h8288;
+                7'd111: rom = 16'h838F;
+                7'd112: rom = 16'h8496;
+                7'd113: rom = 16'h85A3;
+                7'd114: rom = 16'h86AF;
+                7'd115: rom = 16'h87C4;
+                7'd116: rom = 16'h88D7;
+                7'd117: rom = 16'h89E8;
+
                 default: rom = 16'hFFFF; // end marker
             endcase
         end
     endfunction
 
-    localparam [5:0] N_ENTRIES = 6'd61;   // entries 0..60 above
+    localparam [6:0] N_ENTRIES = 7'd118;  // entries 0..117 above
 
     // ---------------- quarter-bit tick (~400 kHz) ----------------
     reg [$clog2(TICK_DIV)-1:0] div;
@@ -143,19 +236,19 @@ module cam_init #(
                ST_DONE  = 3'd7;
 
     reg [2:0]  state;
-    reg [5:0]  idx;
+    reg [6:0]  idx;
     reg [26:0] sh;
     reg [4:0]  bitn;
     reg [1:0]  ph;
     reg [15:0] gap;
     reg        long_gap;
-    reg [15:0] rom_q;   // registered ROM output: the 62-entry mux tree and
+    reg [15:0] rom_q;   // registered ROM output: the 118-entry mux tree and
                         // everything it feeds never share a cycle
 
     always @(posedge clk) begin
         if (rst) begin
             state    <= ST_BOOT;
-            idx      <= 6'd0;
+            idx      <= 7'd0;
             rom_q    <= 16'd0;
             bitn     <= 5'd0;
             ph       <= 2'd0;
@@ -177,7 +270,7 @@ module cam_init #(
                 state <= ST_LOAD;
             end
 
-            // The end-of-table test is on idx (6-bit equality against a
+            // The end-of-table test is on idx (7-bit equality against a
             // constant), not on the 16-bit ROM data - keeps the ROM output
             // out of the state-transition cone. N_ENTRIES must track the
             // table above.
@@ -185,7 +278,7 @@ module cam_init #(
                 if (idx == N_ENTRIES) begin
                     state <= ST_DONE;
                 end else begin
-                    long_gap <= (idx[5:1] == 5'd0);  // entries 0,1 = COM7 reset
+                    long_gap <= (idx[6:1] == 6'd0);  // entries 0,1 = COM7 reset
                     bitn     <= 5'd26;
                     ph       <= 2'd0;
                     state    <= ST_START;
@@ -228,7 +321,7 @@ module cam_init #(
                         siod_low <= 1'b0;
                         ph       <= 2'd0;
                         gap      <= long_gap ? RST_TICKS[15:0] : GAP_TICKS[15:0];
-                        idx      <= idx + 6'd1;
+                        idx      <= idx + 7'd1;
                         state    <= ST_GAP;
                     end
                 endcase

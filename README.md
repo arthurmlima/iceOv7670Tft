@@ -266,8 +266,42 @@ Key OV7670 register deltas from the stock reference table (full table in
 | `COM15` (0x40) | 0xD0 | RGB565, full range |
 | `0x70–0x73`, `0xA2` | QVGA set | 320×240 scaling registers |
 
-Everything else (gamma, AWB, color matrix, windowing, reserved "magic"
-registers) is carried over verbatim from a previously proven configuration.
+Color matrix and windowing/scaling registers are carried over verbatim from
+a previously proven configuration.
+
+### Image-quality tuning block
+
+The original register table above never programmed `COM8`, AEC/banding
+parameters, AWB tuning, pixel correction/edge enhancement, or the gamma
+curve — those all sat at chip reset defaults, which on the OV7670 tends to
+show up as a purple/magenta color cast, exposure hunting or visible banding
+under artificial light, salt-and-pepper pixel noise, and flat/washed-out
+contrast. `cam_init.v` now appends a second block of register writes
+(entries 61–117 of the ROM) sourced verbatim from the mainline Linux kernel
+`ov7670` driver's default register set — the most widely deployed,
+long-proven OV7670 tuning reference — restricted to registers that don't
+touch this design's timing-critical settings (`CLKRC`, `COM7`, `COM3`,
+`COM14`, the window/scaling registers, `DBLV`):
+
+| Block | Registers | Purpose |
+|---|---|---|
+| AEC operating region / banding | `AEW`, `AEB`, `VPT`, `COM11`, `BD50MAX`, `BD60MAX`, `HAECC1-7` | Stable auto-exposure operating range plus 50/60 Hz banding-filter auto-detect (reduces flicker under artificial light) |
+| Auto-control enable | `COM8` = `0xFF` | Turns on fast AGC/AEC, unlimited AEC step, banding filter, AGC, AEC, AWB — previously never written at all |
+| AWB tuning | `BLUE`, `RED`, `0x43-0x48`, `0x59-0x5E`, `0x6A`, `0x6C-0x6F`, `COM16` | Standard fix for the OV7670's well-known purple/magenta color cast |
+| Pixel correction / edge | `EDGE`, `0x75`, `REG76`, `0x4B`, `0x77`, `0xC9` | `REG76` in particular suppresses white/black speckle noise |
+| Gamma curve | `GAM1-15`/`SLOP` (`0x7A-0x89`) | Replaces the flat reset-default tone curve with a standard contrast curve |
+
+`N_ENTRIES` grew from 61 to 118 and the ROM index (`idx`, the `rom()`
+function's input) widened from 6 to 7 bits to address the larger table.
+Total SCCB table time grows from ~150 ms to ~290 ms — still comfortably
+under the ST7789's own ~500 ms init, so no re-tuning of `BOOT_TICKS`/
+`GAP_TICKS`/`RST_TICKS` was needed.
+
+`COM9` (AGC gain ceiling) was deliberately left at its existing `0x38`
+(16× ceiling) rather than the Linux driver's more conservative `0x18` (4×):
+a higher ceiling brightens low-light video at the cost of more visible
+sensor noise/grain. If graininess in dim conditions is part of the
+"quality" complaint, lowering `COM9`'s bits `[6:4]` is the next knob to try.
 
 ---
 
