@@ -152,9 +152,9 @@ Info: Setting up routing queue.
 Info: Routing 2831 arcs.
 Info:            |   (re-)routed arcs  |   delta    | remaining|       time spent     |
 Info:    IterCnt |  w/ripup   wo/ripup |  w/r  wo/r |      arcs| batch(sec) total(sec)|
-Info:       1000 |       42        942 |   42   942 |      1886|       0.28       0.28|
-Info:       2000 |      226       1688 |  184   746 |      1088|       0.03       0.31|
-Info:       3000 |      456       2392 |  230   704 |       380|       0.03       0.34|
+Info:       1000 |       42        942 |   42   942 |      1886|       0.29       0.29|
+Info:       2000 |      226       1688 |  184   746 |      1088|       0.03       0.32|
+Info:       3000 |      456       2392 |  230   704 |       380|       0.03       0.35|
 Info:       3520 |      567       2799 |  111   407 |         0|       0.10       0.45|
 Info: Routing complete.
 Info: Router1 time 0.45s

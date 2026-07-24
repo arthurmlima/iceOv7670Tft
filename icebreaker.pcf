@@ -1,14 +1,26 @@
 # iCEBreaker 12 MHz oscillator
 set_io -nowarn CLK 35
 
+# Explicit constraint for the internally divided PicoRV32 clock.  The primary
+# video clock remains constrained by Makefile FREQ=39.00.
+set_frequency clk_cpu 9.75
+
 # On-board active-low button and LEDs
 set_io -nowarn BTN_N 10
 set_io -nowarn LEDR_N 11
 set_io -nowarn LEDG_N 37
 
-# Snap-off buttons: active-high with external pull-downs
-set_io -nowarn BTN1 20   # P2_9:  request encryption
-set_io -nowarn BTN3 18   # P2_10: request bypass
+# PicoSoC UART
+set_io -nowarn uart_rx 6
+set_io -nowarn uart_tx 9
+
+# Onboard SPI flash (firmware reset vector is at byte offset 0x0010_0000)
+set_io -nowarn flash_clk 15
+set_io -nowarn flash_csb 16
+set_io -nowarn flash_io0 14
+set_io -nowarn flash_io1 17
+set_io -nowarn flash_io2 12
+set_io -nowarn flash_io3 13
 
 # ----------------------------------------------------------------------
 # ST7789: keep the existing known-working six display signals on PMOD 2
@@ -46,4 +58,3 @@ set_io -nowarn cam_d[4] 42   # P1B7
 set_io -nowarn cam_d[5] 36   # P1B8
 set_io -nowarn cam_d[6] 32   # P1B9
 set_io -nowarn cam_d[7] 28   # P1B10
-

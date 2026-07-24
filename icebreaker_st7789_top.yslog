@@ -2735,7 +2735,7 @@ ABC: + &write -n <abc-temp-dir>/output.aig
 ABC: + &verify 
 ABC: Networks are equivalent.  Time =     0.02 sec
 ABC: + time 
-ABC: elapse: 0.15 seconds, total: 0.15 seconds
+ABC: elapse: 0.14 seconds, total: 0.14 seconds
 
 11.44.15.6. Executing AIGER frontend.
 <suppressed ~11 debug messages>
@@ -3070,6 +3070,6 @@ Found and reported 0 problems.
 
 11.53. Executing JSON backend.
 
-End of script. Logfile hash: 017b9c4e2e, time: 1.60s, user: 1.40s, system: 0.03s, MEM: 59.31 MB peak
+End of script. Logfile hash: 18b55e4491, time: 1.62s, user: 1.40s, system: 0.04s, MEM: 59.20 MB peak
 Yosys 0.67+84 (git sha1 e2c27aaaf-dirty, Release, Clang /usr/local/osxcross/target/bin/aarch64-apple-darwin23.5-clang++ 18.1.8)
-Time spent: 49% 11x techmap (0 sec), 17% 39x read_verilog (0 sec), ...
+Time spent: 50% 11x techmap (0 sec), 17% 39x read_verilog (0 sec), ...

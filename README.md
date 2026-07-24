@@ -2,10 +2,11 @@
 
 Pure-Verilog live camera viewfinder for the iCEBreaker (Lattice iCE40UP5K)
 board: an OV7670 camera is streamed straight to an ST7789 TFT/IPS panel with
-**no CPU, no external RAM, and no full frame buffer**. The ST7789's own GRAM
-is the frame store; the FPGA only carries a small FIFO to absorb the
-difference between the camera's bursty active-video timing and the panel's
-constant SPI drain rate.
+**no full frame buffer**. The ST7789's own GRAM is the frame store; the FPGA
+only carries a small FIFO to absorb the difference between the camera's
+bursty active-video timing and the panel's constant SPI drain rate. A
+PicoRV32 auxiliary processor now supplies low-rate memory-mapped control
+without entering the pixel datapath.
 
 ```text
 OV7670 RGB565 → center-crop 320×240 to 280×240
@@ -22,7 +23,8 @@ Top-level entity: **`icebreaker_st7789_top`** (`icebreaker_st7789_top.v`).
 
 | Path | Role |
 |---|---|
-| `icebreaker_st7789_top.v` | Top level: PLL, POR/reset, camera XCLK, SCCB pin, integration, SB_IO pin cells, status LEDs |
+| `icebreaker_st7789_top.v` | Top level: PLL, POR/reset, CPU clock/CDC, camera XCLK, integration, SB_IO pin cells, status LEDs |
+| `camera_control_soc.v` | Reduced PicoSoC-style RV32I control subsystem, safe boot ROM, memory map, and camera MMIO |
 | `cam_init.v` | OV7670 SCCB (I²C-like) master — writes the register table on power-up |
 | `cam_capture.v` | Synchronizes PCLK/HREF/VSYNC, assembles RGB565 bytes, crops 320→280 columns |
 | `frame_stream_gate.v` | Atomically accepts a frame only when the display is ready; drops busy-time frames without flushing/mixing FIFO data |
@@ -32,15 +34,17 @@ Top-level entity: **`icebreaker_st7789_top`** (`icebreaker_st7789_top.v`).
 | `st7789_camera_ctrl.v` | ST7789 reset/init/address-window FSM, streams FIFO pixels into RAMWR |
 | `st7789_init_rom.v` | Combinational ROM: the known-working ST7789 register-init sequence (shared by both the camera build and the reference test-pattern build) |
 | `spi_stream_tx.v` | Gapless mode-0 SPI byte engine, one bit per `clk_sys` cycle via DDR/NEG_TRIGGER `SB_IO` cells |
-| `icebreaker.pcf` | Pin constraints for the build above (see [§6](#6-wiring--pinout)) |
+| `firmware/` | Adapted upstream PicoSoC startup, linker script, interactive firmware, and flash-boot/MMIO testbench |
+| `third_party/picorv32/` | Pinned upstream PicoRV32, PicoSoC flash/UART/SPRAM RTL, SPI-flash model, provenance, and ISC license |
+| `icebreaker.pcf` | Pin constraints for the build above (see [§7](#7-wiring--pinout)) |
 | `Makefile` | `yosys` → `nextpnr-ice40` → `icepack` → `iceprog` build/program flow |
 | `timing_check.py` | Recomputes the clock/line-rate/FIFO-margin numbers in [§4](#4-clock-plan) and [§5](#5-line-rate-proof) |
 | `timing_39MHz.patch` | Historical patch that dropped the PLL from 39.75→39.00 MHz; already folded into the files above, kept only for the record |
 | `unused/` | RTL **not** part of `icebreaker_st7789_top` — see [§1.1](#11-unused--reference-rtl) |
 
-Only the files in the first row through `spi_stream_tx.v` are compiled by
-`make` (the exact `Makefile` `SOURCES` list). Everything under `unused/` and
-`timing_39MHz.patch` is historical/reference material.
+The exact compiled RTL is listed in the `Makefile` `SOURCES` variable.
+Everything under `unused/` and `timing_39MHz.patch` is
+historical/reference material.
 
 ### 1.1 Unused / reference RTL
 
@@ -67,6 +71,12 @@ into `unused/`.
 icebreaker_st7789_top                        (PLL, POR/reset, XCLK gen, LEDs, pin IO cells)
 │
 ├─ SB_PLL40_PAD  "pll"                        [iCE40 primitive] 12 MHz → 39.00 MHz clk_sys
+├─ SB_GB  "cpu_clk_global"                    clk_sys/4 → 9.75 MHz clk_cpu
+├─ camera_control_soc  "control_soc"           RV32I CPU, MMIO, SRAM, flash, UART
+│    ├─ picorv32  "cpu"                       reduced PicoRV32 core
+│    ├─ ice40up5k_spram  "memory"             128 KiB CPU scratch RAM
+│    ├─ spimemio  "flash"                     onboard SPI-flash execute-in-place
+│    └─ simpleuart  "uart"                     PicoSoC-compatible UART
 │
 ├─ cam_init  "camera_config"                  OV7670 SCCB register-write master
 │    (drives cam_sioc directly; siod_low → SB_IO below)
@@ -89,7 +99,8 @@ icebreaker_st7789_top                        (PLL, POR/reset, XCLK gen, LEDs, pi
 │
 ├─ SB_IO  "tft_sclk_io"                       [iCE40 primitive] DDR output cell → tft_scl (SCLK)
 ├─ SB_IO  "tft_mosi_io"                       [iCE40 primitive] NEG_TRIGGER cell → tft_sda (MOSI)
-└─ SB_IO  "tft_dc_io"                         [iCE40 primitive] NEG_TRIGGER cell → tft_dc
+├─ SB_IO  "tft_dc_io"                         [iCE40 primitive] NEG_TRIGGER cell → tft_dc
+└─ SB_IO[3:0]  "flash_io_buf"                 onboard QSPI bidirectional pins
 ```
 
 `tft_blk` (backlight pin) is driven directly by the top level:
@@ -106,6 +117,7 @@ flowchart LR
         OSC["12 MHz\nboard oscillator"] --> PLL["SB_PLL40_PAD\nDIVR=0 DIVF=51 DIVQ=4"]
         PLL --> SYS["clk_sys\n39.00 MHz"]
         SYS -- "÷2 toggle" --> XCLKW["cam_xclk\n19.500 MHz"]
+        SYS -- "÷4 + SB_GB" --> CPUCLK["clk_cpu\n9.750 MHz"]
     end
 
     subgraph RST["Reset"]
@@ -124,8 +136,8 @@ flowchart LR
 
     CAP -- "pix_wr + frame_sync" --> GATE["frame_stream_gate\naccept only when LCD ready"]
     CTRL -. stream_active .-> GATE
-    BTN1["BTN1\nrequest encryption"] --> ENC
-    BTN3["BTN3\nrequest bypass"] --> ENC
+    CPUCLK --> SOC["camera_control_soc\nPicoRV32 + MMIO"]
+    SOC -- "control[0]\n2-FF CDC" --> ENC
     CAP -- "pix_data[15:0]" --> ENC["pixel_xor_stage\nframe seed + XOR/bypass"]
     GATE -- "accepted pixel valid" --> ENC
     ENC -- "pixel[15:0], valid" --> FIFO["pixel_fifo\n256×16 (1 EBR)"]
@@ -135,8 +147,6 @@ flowchart LR
 
     FIFO -- "rd_data[15:0], rd_valid" --> CTRL["st7789_camera_ctrl\n(reset/init/window FSM)"]
     ROM["st7789_init_rom"] --> CTRL
-    EN -. stream_enable .-> CTRL
-
     CTRL --> SPI["spi_stream_tx\n(gapless mode-0, 1 bit/clk_sys)"]
     SPI --> IOC["SB_IO DDR (SCLK)\nSB_IO NEG_TRIGGER (MOSI, DC)"]
     IOC --> TFT["ST7789 panel\n(tft_scl/sda/dc/cs/res)"]
@@ -149,10 +159,11 @@ flowchart LR
     FAULT --> LEDR["LEDR_N\n(red = fault)"]
 ```
 
-The camera/display datapath runs entirely in the single `clk_sys` (39.00 MHz)
-domain — `cam_pclk` is sampled as synchronized *data*, never used as an RTL
-clock. The asynchronous BTN1/BTN3 controls each pass through a two-flop
-synchronizer before entering the frame-control logic.
+The camera/display datapath runs entirely in `clk_sys` (39.00 MHz) —
+`cam_pclk` is sampled as synchronized *data*, never used as an RTL clock.
+PicoRV32 runs independently at 9.75 MHz. Stable control/status levels cross
+between the CPU and video domains through two-flop synchronizers; encryption
+is still committed only at an accepted frame boundary.
 
 ---
 
@@ -162,6 +173,7 @@ synchronizer before entering the frame-control logic.
 |---|---:|---|
 | Board oscillator | 12.000 MHz | iCEBreaker |
 | FPGA system clock (`clk_sys`) | 39.000 MHz | `SB_PLL40_PAD` |
+| PicoRV32 clock (`clk_cpu`) | 9.750 MHz | `clk_sys` / 4 through `SB_GB` |
 | ST7789 SCLK | 39.000 MHz | `clk_sys`, via DDR SPI engine |
 | OV7670 XCLK | 19.500 MHz | `clk_sys` / 2 |
 | OV7670 internal clock | 9.750 MHz | XCLK / 2, `CLKRC = 0x01` |
@@ -169,6 +181,33 @@ synchronizer before entering the frame-control logic.
 
 PLL settings: `DIVR=0`, `DIVF=51`, `DIVQ=4`, `FILTER_RANGE=1`
 (`12 MHz × (51+1) / 2^4 = 39.00 MHz`).
+
+### PicoRV32 control plane
+
+The processor is a reduced RV32I PicoRV32: multiply/divide, compressed
+instructions, PCPI, and interrupts are disabled. The low 32-bit cycle and
+retired-instruction counters are enabled for compatibility with the upstream
+PicoSoC firmware prompt and benchmark commands. Firmware targets `rv32i` with
+the `ilp32` ABI.
+
+The initial camera register map is:
+
+| Address | Access | Description |
+|---:|:---:|---|
+| `0x0300_0000` | RW | Camera control; bit 0 is `0=bypass`, `1=encrypt` |
+| `0x0300_0004` | RO | Status: bit 0 encryption active, bit 1 ready, bit 2 streaming, bit 3 fault, bit 4 CPU trap |
+
+Writes honor PicoRV32 byte strobes. The requested encryption level crosses to
+`clk_sys` and is applied only at the next accepted frame boundary.
+
+The normal Makefile build sets `RISCV_BOOT_FROM_FLASH=1`, so reset fetches
+firmware from onboard-flash offset `0x0010_0000`. CPU SRAM is 128 KiB; the
+UART and flash-controller registers retain the upstream PicoSoC addresses
+`0x0200_0004`/`0x0200_0008` and `0x0200_0000`.
+
+For a hardware-only image, run `make BOOT_FROM_FLASH=0 hardware`. That selects
+the four-instruction internal safety stub, which writes
+`ENCRYPTION_DEFAULT` to `0x0300_0000` and loops instead of executing flash.
 
 ### Why 39.00 MHz and not higher
 
@@ -279,12 +318,12 @@ stepped once per accepted frame, so it produces a deterministic pseudo-random
 seed sequence from `XORMAP_INITIAL_SEED`; it is not a hardware true-random
 generator.
 
-The runtime mode is frame-safe: BTN1 requests encryption, BTN3 requests
-bypass, and BTN3 wins if both are pressed. A request made during a frame takes
-effect on the next accepted frame boundary, never partway through the current
-image. Reset returns to `ENCRYPTION_DEFAULT` (default `0`, bypass). Setting
-the top-level `ENABLE_XORMAP` parameter to `0` makes the encryption stage a
-hard pass-through and allows synthesis to remove the map.
+The runtime mode is frame-safe: PicoRV32 control bit 0 requests encryption
+when set and bypass when clear. A write made during a frame takes effect on
+the next accepted frame boundary, never partway through the current image.
+Reset returns to `ENCRYPTION_DEFAULT` (default `0`, bypass). Setting the
+top-level `ENABLE_XORMAP` parameter to `0` makes the encryption stage a hard
+pass-through and allows synthesis to remove the map.
 
 `frame_stream_gate` prevents spatial mixing when camera/display timing slips.
 If a new camera frame arrives while the LCD controller is still streaming,
@@ -371,10 +410,10 @@ build actually uses), not from board silkscreen labels:
 |---|---:|---|
 | `CLK` (board osc) | 35 | — |
 | `BTN_N` | 10 | — |
-| `BTN1` (encryption request, active high) | 20 | P2_9 |
-| `BTN3` (bypass request, active high) | 18 | P2_10 |
 | `LEDR_N` | 11 | — |
 | `LEDG_N` | 37 | — |
+| PicoSoC `uart_rx`, `uart_tx` | 6, 9 | onboard UART |
+| Flash `clk`, `csb`, `io[0..3]` | 15, 16, 14, 17, 12, 13 | onboard SPI flash |
 | **ST7789** `tft_scl` (SCK) | 27 | P2B1 |
 | **ST7789** `tft_sda` (MOSI) | 25 | P2B2 |
 | **ST7789** `tft_res` | 21 | P2B3 |
@@ -395,9 +434,9 @@ build actually uses), not from board silkscreen labels:
 `PULLUP=1`); a short external 4.7 kΩ pull-up to 3.3 V may help if SCCB
 wiring is long. `cam_sioc` is push-pull.
 
-BTN1/BTN3 are the active-high snap-off buttons with external pull-downs.
-BTN2 is not available for this feature because its pin 19 is already used by
-`tft_dc`.
+The former BTN1/BTN3 encryption controls and their PMOD constraints have been
+removed; pins 20 and 18 are now free. BTN2 remains unavailable because pin 19
+is used by `tft_dc`.
 
 > **Note:** an earlier draft of this document described the display on
 > PMOD 1B and the camera on PMOD 1A/2 with different pin numbers than the
@@ -412,24 +451,57 @@ BTN2 is not available for this feature because its pin 19 is already used by
 
 ## 8. Build and program
 
-Required tools: `yosys`, `nextpnr-ice40`, `icepack`, `iceprog`.
+Required FPGA tools are `yosys`, `nextpnr-ice40`, `icepack`, `iceprog`,
+`iverilog`, and `vvp`. The firmware defaults to the supplied toolchain prefix
+`/opt/riscv32i/bin/riscv32-unknown-elf-`; override `CROSS` if it is installed
+elsewhere.
 
 ```sh
-make          # yosys -> nextpnr-ice40 -> icepack -> icebreaker_st7789_top.bin
-make prog     # iceprog icebreaker_st7789_top.bin
-make timing   # python3 timing_check.py
-make clean
+make              # build flash-boot FPGA image and RV32I firmware
+make firmware     # ELF, map, disassembly, Verilog hex, and raw flash binary
+make hardware     # yosys -> nextpnr-ice40 -> icepack
+make sim          # RTL SPI-flash boot, UART, and camera-MMIO test
+make synsim       # synthesized-SoC flash-boot/MMIO smoke test
+make check-all    # firmware + RTL sim + hardware + synthesized sim
+make prog         # program FPGA image, then firmware at flash offset 1 MiB
+make prog-fpga    # program only the FPGA image
+make prog-fw      # update only firmware at flash offset 1 MiB
+make timing
+make clean        # remove generated files under build/
 ```
 
 The build targets `up5k-sg48` and asks nextpnr to close timing at 39.00 MHz
-(`Makefile` `FREQ`). Build sources are exactly:
+(`Makefile` `FREQ`), constrains `clk_cpu` to 9.75 MHz, and pins nextpnr seed 1
+for reproducible placement. All generated hardware and firmware artifacts are
+written below `build/`, leaving the historical root-level artifacts alone.
+FPGA filenames include `_boot1` or `_boot0`, so changing `BOOT_FROM_FLASH`
+always selects a distinct synthesis result.
+Compiled RTL sources are exactly:
 
 ```text
 icebreaker_st7789_top.v
+camera_control_soc.v
 cam_init.v cam_capture.v frame_stream_gate.v
 pixel_xor_stage.v xormap_32.v pixel_fifo.v
 st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
+third_party/picorv32/ice40up5k_spram.v
+third_party/picorv32/spimemio.v
+third_party/picorv32/simpleuart.v
+third_party/picorv32/picorv32.v
 ```
+
+The firmware flow preprocesses `firmware/sections.lds`, then compiles
+`firmware/start.s` and `firmware/firmware.c` with
+`-march=rv32i -mabi=ilp32`. The linker entry and CPU reset vector are both
+`0x0010_0000`. The UART menu retains the upstream PicoSoC flash diagnostics
+and adds:
+
+- `E`: request encrypted video;
+- `B`: request bypass video;
+- `C`: print camera request and live status.
+
+Encryption changes still take effect only at the next accepted frame
+boundary.
 
 ---
 
@@ -441,10 +513,8 @@ st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
   camera frame being rejected because the previous panel transfer has not
   completed. Stays latched until reset.
 - **User button (`BTN_N`)** — full camera and panel reset/reinitialization
-  (also gated by `pll_lock` and a POR counter on power-up).
-- **BTN1** — request XOR-map encryption; applies at the next frame boundary.
-- **BTN3** — request bypass; applies at the next frame boundary and has
-  priority over BTN1.
+  plus PicoRV32 reset (also gated by `pll_lock` and a POR counter on
+  power-up).
 - **Backlight (`tft_blk`)** — driven low (off) through the hardware reset
   pulse, then turned on by `st7789_camera_ctrl` as soon as the init FSM
   finishes walking `st7789_init_rom` (before the first frame streams, but
@@ -482,11 +552,20 @@ st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
 
 ## 11. Verification status
 
-The integrated design has been synthesized, placed, routed, and packed with
-the installed OSS CAD Suite. Yosys reports 623 `SB_LUT4` cells and three
-`SB_RAM40_4K` blocks. Six nextpnr seeds all pass the 39.00 MHz constraint;
-their final maximum-frequency estimates range from 43.52 to 46.10 MHz, and
-the routed design uses 847/5280 logic cells (16%).
+The flash-boot CPU/video design has been synthesized, placed, routed, and
+packed with the installed OSS CAD Suite. Yosys reports zero structural
+problems, 2,876 `SB_LUT4` cells, seven `SB_RAM40_4K` blocks, and four
+`SB_SPRAM256KA` blocks. The routed seed-1 design uses 3,480/5,280 logic cells
+(65%) and meets both clocks: 45.52 MHz estimated maximum for the required
+39.00 MHz video domain, and 24.02 MHz for the required 9.75 MHz CPU domain.
+
+GCC 16.1 builds the adapted firmware as an ELF32 RV32I executable with entry
+point `0x0010_0000`; the physical flash binary is 6,676 bytes. The RTL
+simulation boots that firmware through the SPI-flash model, sends ENTER and
+the `E` command through the UART, and observes camera encryption being set
+without a CPU trap. A synthesized-SoC simulation independently boots a
+minimal build of the same C camera-control function and observes the same
+MMIO write.
 
 Behavioral tests exercised a complete rejected 280×240 frame (all 67,200
 pixel strobes suppressed without altering the retained FIFO/map state) and

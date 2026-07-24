@@ -20,12 +20,12 @@ module pixel_fifo #(
 
     input  wire          wr_en,
     input  wire [15:0]   wr_data,
-    output wire          full,
+    output reg           full,
 
     input  wire          rd_en,
     output reg  [15:0]   rd_data,
     output reg           rd_valid,
-    output wire          empty,
+    output reg           empty,
 
     output reg           overflow,
     output reg           underflow,
@@ -38,9 +38,6 @@ module pixel_fifo #(
     wire do_wr = wr_en && !full;
     wire do_rd = rd_en && !empty;
 
-    assign empty = (level == {(AW+1){1'b0}});
-    assign full  = (level == DEPTH);
-
     always @(posedge clk) begin
         if (rst) begin
             wr_ptr    <= {AW{1'b0}};
@@ -50,6 +47,8 @@ module pixel_fifo #(
             level     <= {(AW+1){1'b0}};
             overflow  <= 1'b0;
             underflow <= 1'b0;
+            empty     <= 1'b1;
+            full      <= 1'b0;
         end else begin
             rd_valid <= 1'b0;
 
@@ -58,6 +57,8 @@ module pixel_fifo #(
                 rd_ptr   <= {AW{1'b0}};
                 level    <= {(AW+1){1'b0}};
                 rd_valid <= 1'b0;
+                empty    <= 1'b1;
+                full     <= 1'b0;
             end else begin
                 if (do_wr) begin
                     mem[wr_ptr] <= wr_data;
@@ -70,10 +71,24 @@ module pixel_fifo #(
                     rd_valid <= 1'b1;
                 end
 
+                // Keep empty/full as state instead of putting the wide level
+                // comparisons in the same-cycle EBR enable path.
                 case ({do_wr, do_rd})
-                    2'b10: level <= level + 1'b1;
-                    2'b01: level <= level - 1'b1;
-                    default: level <= level;
+                    2'b10: begin
+                        level <= level + 1'b1;
+                        empty <= 1'b0;
+                        full  <= (level == DEPTH-1);
+                    end
+                    2'b01: begin
+                        level <= level - 1'b1;
+                        empty <= (level == 1);
+                        full  <= 1'b0;
+                    end
+                    default: begin
+                        level <= level;
+                        empty <= empty;
+                        full  <= full;
+                    end
                 endcase
             end
 

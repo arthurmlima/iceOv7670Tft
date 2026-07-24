@@ -3,7 +3,8 @@
 // ============================================================================
 // icebreaker_st7789_top.v
 //
-// OV7670 -> 256x16 FIFO -> ST7789, no CPU and no external framebuffer.
+// OV7670 -> 256x16 FIFO -> ST7789, with a PicoRV32 control processor and no
+// external framebuffer.
 // PLL stays at the original 39.00 MHz. Raising it to 42.00 MHz (see git
 // history) closes timing with the *old* SPI engine, but once the SPI engine
 // below was rebuilt with SB_IO DDR/NEG_TRIGGER cells, the added IO logic
@@ -32,14 +33,23 @@ module icebreaker_st7789_top #(
     parameter integer BL_ACTIVE_HIGH     = 1,
     parameter integer ENABLE_XORMAP      = 1,
     parameter integer ENCRYPTION_DEFAULT = 0,
+    parameter integer RISCV_BOOT_FROM_FLASH = 0,
     parameter [31:0]  XORMAP_INITIAL_SEED = 32'h1ACE_B00C
 )(
     input  wire       CLK,
     input  wire       BTN_N,
-    input  wire       BTN1,
-    input  wire       BTN3,
     output wire       LEDR_N,
     output wire       LEDG_N,
+
+    // PicoSoC-compatible UART and onboard SPI flash
+    output wire       uart_tx,
+    input  wire       uart_rx,
+    output wire       flash_csb,
+    output wire       flash_clk,
+    inout  wire       flash_io0,
+    inout  wire       flash_io1,
+    inout  wire       flash_io2,
+    inout  wire       flash_io3,
 
     // ST7789 - existing working display pins
     output wire       tft_scl,
@@ -93,6 +103,7 @@ module icebreaker_st7789_top #(
     localparam integer POR_W = (POR_CYCLES <= 2) ? 1 : $clog2(POR_CYCLES+1);
 
     reg [POR_W-1:0] por_count = {POR_W{1'b0}};
+    reg por_done = 1'b0;
     reg btn_meta = 1'b1;
     reg btn_sync = 1'b1;
 
@@ -100,14 +111,44 @@ module icebreaker_st7789_top #(
         btn_meta <= BTN_N;
         btn_sync <= btn_meta;
 
-        if (!pll_lock || !btn_sync)
+        if (!pll_lock || !btn_sync) begin
             por_count <= {POR_W{1'b0}};
-        else if (por_count < POR_CYCLES)
-            por_count <= por_count + 1'b1;
+            por_done  <= 1'b0;
+        end else if (!por_done) begin
+            if (por_count >= POR_CYCLES-1)
+                por_done <= 1'b1;
+            else
+                por_count <= por_count + 1'b1;
+        end
     end
 
-    wire resetn = pll_lock && btn_sync && (por_count >= POR_CYCLES);
+    wire resetn = pll_lock && btn_sync && por_done;
     wire rst = !resetn;
+
+    // ---------------- low-speed CPU clock domain ----------------
+    // A full PicoRV32/flash/UART path does not close at the 39 MHz video rate
+    // on UP5K.  Keep the datapath clock untouched and run the auxiliary CPU at
+    // clk_sys/4 = 9.75 MHz on a dedicated global clock.
+    reg [1:0] cpu_clk_div = 2'b00;
+    always @(posedge clk_sys)
+        cpu_clk_div <= cpu_clk_div + 1'b1;
+
+    wire clk_cpu;
+    SB_GB cpu_clk_global (
+        .USER_SIGNAL_TO_GLOBAL_BUFFER (cpu_clk_div[1]),
+        .GLOBAL_BUFFER_OUTPUT         (clk_cpu)
+    );
+
+    // Synchronous release in the CPU domain; assertion remains effective on
+    // the next continuously-running CPU clock edge.
+    (* ASYNC_REG = "TRUE" *) reg [1:0] cpu_reset_sync = 2'b00;
+    always @(posedge clk_cpu or negedge resetn) begin
+        if (!resetn)
+            cpu_reset_sync <= 2'b00;
+        else
+            cpu_reset_sync <= {cpu_reset_sync[0], 1'b1};
+    end
+    wire cpu_resetn = cpu_reset_sync[1];
 
     // A local registered reset keeps the XOR-map's high-fanout state control
     // off the already timing-sensitive top-level reset path.  Camera startup
@@ -116,31 +157,26 @@ module icebreaker_st7789_top #(
     always @(posedge clk_sys)
         encryption_rst <= rst;
 
-    // ---------------- frame-safe encryption controls ----------------
-    // The snap-off BTN1/BTN3 inputs are active-high.  BTN1 requests
-    // encryption; BTN3 requests bypass and has priority if both are held.
-    // Separate set/clear buttons make contact bounce harmless because it only
-    // repeats the same idempotent assignment.  pixel_xor_stage applies the
-    // request at the next accepted frame boundary.
-    (* ASYNC_REG = "TRUE" *) reg [1:0] btn1_sync = 2'b00;
-    (* ASYNC_REG = "TRUE" *) reg [1:0] btn3_sync = 2'b00;
-    reg encrypt_requested = (ENCRYPTION_DEFAULT != 0);
+    // The PicoRV32 MMIO control bit replaces the former BTN1/BTN3 latch.
+    // pixel_xor_stage still samples the request only at an accepted frame
+    // boundary, so CPU writes cannot split a frame between modes.
+    wire encrypt_requested_cpu;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] encrypt_request_sync = 2'b00;
 
     always @(posedge clk_sys) begin
-        if (rst) begin
-            btn1_sync         <= 2'b00;
-            btn3_sync         <= 2'b00;
-            encrypt_requested <= (ENCRYPTION_DEFAULT != 0);
-        end else begin
-            btn1_sync <= {btn1_sync[0], BTN1};
-            btn3_sync <= {btn3_sync[0], BTN3};
-
-            if (btn3_sync[1])
-                encrypt_requested <= 1'b0;
-            else if (btn1_sync[1])
-                encrypt_requested <= 1'b1;
-        end
+        if (rst)
+            encrypt_request_sync <= {
+                2{(ENCRYPTION_DEFAULT != 0)}
+            };
+        else
+            encrypt_request_sync <= {
+                encrypt_request_sync[0],
+                encrypt_requested_cpu
+            };
     end
+
+    wire encrypt_requested = encrypt_request_sync[1];
+    wire cpu_trap;
 
     // ---------------- camera clock and static controls ----------------
     reg cam_xclk_q;
@@ -290,7 +326,10 @@ module icebreaker_st7789_top #(
     ) display (
         .clk           (clk_sys),
         .resetn        (resetn),
-        .stream_enable (stream_enable),
+        // accepted_frame_sync can only be asserted after both initializers
+        // are done, so this redundant gate is tied high to shorten the
+        // display's 39 MHz next-state path.
+        .stream_enable (1'b1),
         .frame_sync    (accepted_frame_sync),
         .fifo_empty    (fifo_empty),
         .fifo_rd_data  (fifo_rd_data),
@@ -355,8 +394,45 @@ module icebreaker_st7789_top #(
     assign LEDG_N = ~stream_enable;
     assign LEDR_N = ~stream_fault;
 
+    // ---------------- PicoRV32 camera-control SoC ----------------
+    wire [3:0] flash_io_oe;
+    wire [3:0] flash_io_do;
+    wire [3:0] flash_io_di;
+
+    camera_control_soc #(
+        .ENCRYPTION_DEFAULT (ENCRYPTION_DEFAULT),
+        .BOOT_FROM_FLASH    (RISCV_BOOT_FROM_FLASH)
+    ) control_soc (
+        .clk               (clk_cpu),
+        .resetn            (cpu_resetn),
+        .encryption_active (encryption_active),
+        .stream_ready      (stream_enable),
+        .stream_active     (lcd_stream_active),
+        .stream_fault      (stream_fault),
+        .encrypt_requested (encrypt_requested_cpu),
+        .cpu_trap          (cpu_trap),
+        .uart_tx           (uart_tx),
+        .uart_rx           (uart_rx),
+        .flash_csb         (flash_csb),
+        .flash_clk         (flash_clk),
+        .flash_io_oe       (flash_io_oe),
+        .flash_io_do       (flash_io_do),
+        .flash_io_di       (flash_io_di)
+    );
+
+    // Onboard flash pins are bidirectional in QSPI mode.
+    SB_IO #(
+        .PIN_TYPE (6'b101001),
+        .PULLUP   (1'b0)
+    ) flash_io_buf [3:0] (
+        .PACKAGE_PIN   ({flash_io3, flash_io2, flash_io1, flash_io0}),
+        .OUTPUT_ENABLE (flash_io_oe),
+        .D_OUT_0       (flash_io_do),
+        .D_IN_0        (flash_io_di)
+    );
+
     // Explicitly consume status nets that are useful for probing but not pins.
     wire _unused_ok = &{1'b0, fifo_full, fifo_level[8], lcd_frame_done,
-                        lcd_stream_active, encryption_active};
+                        lcd_stream_active, encryption_active, cpu_trap};
 endmodule
 `default_nettype wire
