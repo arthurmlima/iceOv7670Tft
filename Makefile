@@ -20,6 +20,7 @@ VVP          ?= vvp
 
 CROSS        ?= /opt/riscv32i/bin/riscv32-unknown-elf-
 FW_CFLAGS    ?= -Os
+FW_FLASH_OFFSET ?= 1M
 
 SOURCES := icebreaker_st7789_top.v \
            camera_control_soc.v \
@@ -56,6 +57,7 @@ FW_SMOKE_ELF := $(BUILD_DIR)/icebreaker_fw_smoke.elf
 FW_SMOKE_HEX := $(BUILD_DIR)/icebreaker_fw_smoke.hex
 
 SIM_VVP      := $(BUILD_DIR)/firmware_tb.vvp
+CAM_INIT_SIM_VVP := $(BUILD_DIR)/cam_init_tb.vvp
 SOC_SYN_JSON := $(BUILD_DIR)/camera_control_soc_syn.json
 SOC_SYN_V    := $(BUILD_DIR)/camera_control_soc_syn.v
 SOC_SYN_LOG  := $(BUILD_DIR)/camera_control_soc_syn.yslog
@@ -148,6 +150,12 @@ sim: $(SIM_VVP) $(FW_SIM_HEX)
 sim-vcd: $(SIM_VVP) $(FW_SIM_HEX)
 	$(VVP) -N $(SIM_VVP) +firmware=$(abspath $(FW_SIM_HEX)) +vcd
 
+$(CAM_INIT_SIM_VVP): firmware/cam_init_tb.v cam_init.v Makefile | $(BUILD_DIR)
+	$(IVERILOG) -g2012 -s testbench -o $@ firmware/cam_init_tb.v cam_init.v
+
+cam-init-sim: $(CAM_INIT_SIM_VVP)
+	$(VVP) -N $(CAM_INIT_SIM_VVP)
+
 $(SOC_SYN_JSON): $(SOC_SOURCES) Makefile | $(BUILD_DIR)
 	$(YOSYS) -ql $(SOC_SYN_LOG) \
 		-p 'chparam -set BOOT_FROM_FLASH 1 camera_control_soc; chparam -set STACKADDR 64 camera_control_soc; synth_ice40 -top camera_control_soc -json $@' \
@@ -172,15 +180,32 @@ icebsynsim: synsim
 
 # ---------------- Board programming ----------------
 
+# Explicit deployment-only workflow. None of these targets run simulations or
+# regression tests:
+#   make synthesis          build the FPGA bitstream
+#   make load-bitstream     build and program the FPGA bitstream
+#   make compile-firmware   compile the RV32I firmware artifacts
+#   make load-firmware      compile and program firmware at FW_FLASH_OFFSET
+#   make deploy             build and program both images
+synthesis: hardware
+
+compile-firmware: firmware
+
+load-bitstream: prog-fpga
+
+load-firmware: prog-fw
+
+deploy: prog
+
 prog: $(BITSTREAM) $(FW_BIN)
 	$(ICEPROG) $(BITSTREAM)
-	$(ICEPROG) -o 1M $(FW_BIN)
+	$(ICEPROG) -o $(FW_FLASH_OFFSET) $(FW_BIN)
 
 prog-fpga: $(BITSTREAM)
 	$(ICEPROG) $(BITSTREAM)
 
 prog-fw: $(FW_BIN)
-	$(ICEPROG) -o 1M $(FW_BIN)
+	$(ICEPROG) -o $(FW_FLASH_OFFSET) $(FW_BIN)
 
 icebprog: prog
 icebprog_fw: prog-fw
@@ -188,7 +213,7 @@ icebprog_fw: prog-fw
 timing:
 	python3 timing_check.py
 
-check: firmware sim hardware
+check: firmware cam-init-sim sim hardware
 
 check-all: check synsim
 
@@ -211,12 +236,14 @@ GENERATED := $(JSON) $(ASC) $(BITSTREAM) $(YSLOG) $(NPNRLOG) \
              $(FW_LDS) $(FW_ELF) $(FW_HEX) $(FW_BIN) $(FW_DIS) $(FW_MAP) \
              $(FW_SIM_ELF) $(FW_SIM_HEX) \
              $(FW_SMOKE_ELF) $(FW_SMOKE_HEX) \
-             $(SIM_VVP) $(SOC_SYN_JSON) $(SOC_SYN_V) $(SOC_SYN_LOG) \
+             $(SIM_VVP) $(CAM_INIT_SIM_VVP) \
+             $(SOC_SYN_JSON) $(SOC_SYN_V) $(SOC_SYN_LOG) \
              $(SYN_SIM_VVP) $(SIM_VCD)
 
 clean:
 	rm -f $(GENERATED)
 
-.PHONY: all hardware firmware firmware-info sim sim-vcd synsim \
+.PHONY: all hardware firmware firmware-info sim sim-vcd cam-init-sim synsim \
+        synthesis compile-firmware load-bitstream load-firmware deploy \
         icebsim icebsynsim prog prog-fpga prog-fw icebprog icebprog_fw \
         timing check check-all clean

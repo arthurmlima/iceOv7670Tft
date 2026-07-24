@@ -28,7 +28,8 @@ module cam_capture (
 
     output reg  [15:0] pix_data,
     output reg         pix_wr,
-    output reg         frame_sync
+    output reg         frame_sync,
+    output wire        frame_active
 );
     localparam [8:0] COL_FIRST = 9'd20;
     localparam [8:0] COL_LAST  = 9'd299;
@@ -70,6 +71,10 @@ module cam_capture (
     reg [7:0] hi_byte;
     reg       armed;
     reg       in_window;
+
+    // Exposed so runtime camera reconfiguration can wait for the currently
+    // armed frame to end before changing sensor registers.
+    assign frame_active = armed;
 
     // Registered comparison removes the crop comparators from the pixel-write
     // strobe path.  Coordinates change only at the much slower PCLK edges.

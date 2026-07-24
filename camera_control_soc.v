@@ -52,6 +52,17 @@
 //       bit 2: display is streaming a frame
 //       bit 3: sticky stream/FIFO fault
 //       bit 4: PicoRV32 trapped
+//   0x0300_0008                 camera configuration command (RW)
+//       bits 8:0: table entry count (1..256)
+//       bit 30: clear rejected-command flag (write one)
+//       bit 31: apply the staged table (write one)
+//   0x0300_000C                 camera configuration status (RO)
+//       bit 0: table locked / apply pending or active
+//       bit 1: current/last apply completed and idle
+//       bit 2: rejected command or write
+//       bits 16:8: current table index
+//   0x0300_1000 .. 0x0300_13FF  camera configuration table (WO)
+//       256 32-bit slots; low 16 bits are {register, value}
 //
 // Until firmware is deliberately enabled, the CPU starts in a four-word boot
 // ROM that writes ENCRYPTION_DEFAULT to the control register and loops.  With
@@ -67,6 +78,20 @@ module camera_control_soc #(
 ) (
     input  wire        clk,
     input  wire        resetn,
+
+    // Camera-configuration port. The table RAM has a CPU-clocked write port
+    // and a camera-clocked synchronous read port.
+    input  wire        camera_cfg_clk,
+    input  wire        camera_cfg_resetn,
+    input  wire        camera_cfg_safe,
+    output reg         camera_cfg_start,
+    output reg  [8:0]  camera_cfg_count,
+    output reg  [15:0] camera_cfg_data,
+    input  wire [7:0]  camera_cfg_addr,
+    input  wire        camera_cfg_busy,
+    input  wire        camera_cfg_done,
+    input  wire [8:0]  camera_cfg_index,
+    output wire        camera_cfg_pending,
 
     input  wire        encryption_active,
     input  wire        stream_ready,
@@ -89,6 +114,10 @@ module camera_control_soc #(
     localparam [31:0] RAM_BYTES    = 4 * MEM_WORDS;
     localparam [31:0] CONTROL_ADDR = 32'h0300_0000;
     localparam [31:0] STATUS_ADDR  = 32'h0300_0004;
+    localparam [31:0] CFG_COMMAND_ADDR = 32'h0300_0008;
+    localparam [31:0] CFG_STATUS_ADDR  = 32'h0300_000C;
+    localparam [31:0] CFG_TABLE_BASE   = 32'h0300_1000;
+    localparam [31:0] CFG_TABLE_END    = 32'h0300_1400;
     localparam [31:0] CPU_RESET_ADDR =
         (BOOT_FROM_FLASH != 0) ? 32'h0010_0000 : 32'h0000_0000;
 
@@ -111,6 +140,133 @@ module camera_control_soc #(
             status_sync <= status_meta;
         end
     end
+
+    // ---------------- programmable camera-configuration table ----------------
+    // One 4-Kbit EBR holds 256 packed {register,value} entries. The CPU port
+    // is write-only so the second hardware port remains available to cam_init
+    // on camera_cfg_clk.
+    (* ram_style = "block" *) reg [15:0] camera_config_mem [0:255];
+
+    always @(posedge camera_cfg_clk)
+        camera_cfg_data <= camera_config_mem[camera_cfg_addr];
+
+    // APPLY uses a request/acknowledge toggle. The count is held unchanged
+    // from request until acknowledgement and crosses beside the toggle through
+    // two registers. This avoids a pulse crossing and prevents firmware from
+    // changing the table while cam_init is reading it.
+    reg [8:0] camera_cfg_count_hold;
+    reg       camera_cfg_request_toggle;
+    reg       camera_cfg_rejected;
+
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_req_meta;
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_req_sync;
+    (* ASYNC_REG = "TRUE" *) reg [8:0] camera_cfg_count_meta;
+    (* ASYNC_REG = "TRUE" *) reg [8:0] camera_cfg_count_sync;
+
+    reg camera_cfg_ack_toggle;
+    reg camera_cfg_active;
+    reg camera_cfg_active_toggle;
+    reg camera_cfg_seen_busy;
+    reg camera_cfg_request_settling;
+
+    assign camera_cfg_pending =
+        (camera_cfg_req_sync != camera_cfg_ack_toggle) ||
+        camera_cfg_active;
+
+    always @(posedge camera_cfg_clk) begin
+        if (!camera_cfg_resetn) begin
+            camera_cfg_req_meta      <= 1'b0;
+            camera_cfg_req_sync      <= 1'b0;
+            camera_cfg_count_meta    <= 9'd0;
+            camera_cfg_count_sync    <= 9'd0;
+            camera_cfg_ack_toggle    <= 1'b0;
+            camera_cfg_active        <= 1'b0;
+            camera_cfg_active_toggle <= 1'b0;
+            camera_cfg_seen_busy     <= 1'b0;
+            camera_cfg_request_settling <= 1'b0;
+            camera_cfg_start         <= 1'b0;
+            camera_cfg_count         <= 9'd0;
+        end else begin
+            camera_cfg_req_meta   <= camera_cfg_request_toggle;
+            camera_cfg_req_sync   <= camera_cfg_req_meta;
+            camera_cfg_count_meta <= camera_cfg_count_hold;
+            camera_cfg_count_sync <= camera_cfg_count_meta;
+            camera_cfg_start      <= 1'b0;
+
+            if (!camera_cfg_active) begin
+                camera_cfg_seen_busy <= 1'b0;
+
+                if (camera_cfg_req_sync == camera_cfg_ack_toggle) begin
+                    camera_cfg_request_settling <= 1'b0;
+                end else if (!camera_cfg_request_settling) begin
+                    // The request toggle and held count are a bundled CDC.
+                    // Wait one full destination cycle after seeing the
+                    // request so every count bit has settled before use.
+                    camera_cfg_request_settling <= 1'b1;
+                end else if (camera_cfg_safe && !camera_cfg_busy) begin
+                    // camera_cfg_safe is asserted only after capture and the
+                    // LCD have completed the previous frame. The pending level
+                    // has already inhibited the next frame by this point.
+                    camera_cfg_count         <= camera_cfg_count_sync;
+                    camera_cfg_active_toggle <= camera_cfg_req_sync;
+                    camera_cfg_start         <= 1'b1;
+                    camera_cfg_active        <= 1'b1;
+                    camera_cfg_request_settling <= 1'b0;
+                end
+            end else begin
+                if (camera_cfg_busy)
+                    camera_cfg_seen_busy <= 1'b1;
+
+                // Require busy to have been observed. Otherwise the sticky
+                // done level from a previous run could acknowledge a new
+                // request before cam_init sees its start pulse.
+                if (camera_cfg_seen_busy && !camera_cfg_busy &&
+                    camera_cfg_done) begin
+                    camera_cfg_ack_toggle <= camera_cfg_active_toggle;
+                    camera_cfg_active     <= 1'b0;
+                    camera_cfg_seen_busy  <= 1'b0;
+                end
+            end
+        end
+    end
+
+    // Return acknowledgement and camera progress/status to the CPU domain.
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_ack_meta;
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_ack_sync;
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_busy_meta;
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_busy_sync;
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_done_meta;
+    (* ASYNC_REG = "TRUE" *) reg       camera_cfg_done_sync;
+    (* ASYNC_REG = "TRUE" *) reg [8:0] camera_cfg_index_meta;
+    (* ASYNC_REG = "TRUE" *) reg [8:0] camera_cfg_index_sync;
+
+    always @(posedge clk) begin
+        if (!resetn) begin
+            camera_cfg_ack_meta   <= 1'b0;
+            camera_cfg_ack_sync   <= 1'b0;
+            camera_cfg_busy_meta  <= 1'b0;
+            camera_cfg_busy_sync  <= 1'b0;
+            camera_cfg_done_meta  <= 1'b0;
+            camera_cfg_done_sync  <= 1'b0;
+            camera_cfg_index_meta <= 9'd0;
+            camera_cfg_index_sync <= 9'd0;
+        end else begin
+            camera_cfg_ack_meta   <= camera_cfg_ack_toggle;
+            camera_cfg_ack_sync   <= camera_cfg_ack_meta;
+            camera_cfg_busy_meta  <= camera_cfg_busy;
+            camera_cfg_busy_sync  <= camera_cfg_busy_meta;
+            camera_cfg_done_meta  <= camera_cfg_done;
+            camera_cfg_done_sync  <= camera_cfg_done_meta;
+            camera_cfg_index_meta <= camera_cfg_index;
+            camera_cfg_index_sync <= camera_cfg_index_meta;
+        end
+    end
+
+    wire camera_cfg_locked =
+        (camera_cfg_request_toggle != camera_cfg_ack_sync) ||
+        camera_cfg_busy_sync;
+    wire camera_cfg_completed = camera_cfg_done_sync &&
+                                !camera_cfg_locked;
 
     // ---------------- PicoRV32 native memory bus ----------------
     wire        mem_valid;
@@ -269,33 +425,113 @@ module camera_control_soc #(
         .reg_dat_wait (simpleuart_reg_dat_wait)
     );
 
-    // ---------------- camera control/status MMIO ----------------
-    wire control_sel = mem_valid && (mem_addr == CONTROL_ADDR);
-    wire status_sel  = mem_valid && (mem_addr == STATUS_ADDR);
+    // ---------------- camera control/configuration MMIO ----------------
+    wire control_sel =
+        mem_valid && (mem_addr == CONTROL_ADDR);
+    wire status_sel =
+        mem_valid && (mem_addr == STATUS_ADDR);
+    wire camera_cfg_command_sel =
+        mem_valid && (mem_addr == CFG_COMMAND_ADDR);
+    wire camera_cfg_status_sel =
+        mem_valid && (mem_addr == CFG_STATUS_ADDR);
+    wire camera_cfg_table_sel =
+        mem_valid && (mem_addr >= CFG_TABLE_BASE) &&
+        (mem_addr < CFG_TABLE_END);
+
     reg        mmio_ready;
     reg [31:0] mmio_rdata;
 
+    wire [8:0] camera_cfg_command_count = {
+        mem_wstrb[1] ? mem_wdata[8]   : camera_cfg_count_hold[8],
+        mem_wstrb[0] ? mem_wdata[7:0] : camera_cfg_count_hold[7:0]
+    };
+    wire camera_cfg_command_count_valid =
+        (camera_cfg_command_count != 9'd0) &&
+        (!camera_cfg_command_count[8] ||
+         (camera_cfg_command_count[7:0] == 8'd0));
+
+    wire camera_cfg_table_write =
+        camera_cfg_table_sel && !mmio_ready && !camera_cfg_locked &&
+        (|mem_wstrb[1:0]);
+
+    // Byte enables are retained for the low 16-bit packed entry. The upper
+    // half of each naturally aligned RV32 table slot is intentionally unused.
+    always @(posedge clk) begin
+        if (camera_cfg_table_write) begin
+            if (mem_wstrb[0])
+                camera_config_mem[mem_addr[9:2]][7:0] <= mem_wdata[7:0];
+            if (mem_wstrb[1])
+                camera_config_mem[mem_addr[9:2]][15:8] <= mem_wdata[15:8];
+        end
+    end
+
     always @(posedge clk) begin
         if (!resetn) begin
-            mmio_ready        <= 1'b0;
-            mmio_rdata        <= 32'd0;
-            encrypt_requested <= (ENCRYPTION_DEFAULT != 0);
+            mmio_ready               <= 1'b0;
+            mmio_rdata               <= 32'd0;
+            encrypt_requested        <= (ENCRYPTION_DEFAULT != 0);
+            camera_cfg_count_hold    <= 9'd0;
+            camera_cfg_request_toggle <= 1'b0;
+            camera_cfg_rejected      <= 1'b0;
         end else begin
             mmio_ready <= 1'b0;
 
-            if (!mmio_ready && (control_sel || status_sel)) begin
+            if (!mmio_ready &&
+                (control_sel || status_sel ||
+                 camera_cfg_command_sel || camera_cfg_status_sel ||
+                 camera_cfg_table_sel)) begin
                 mmio_ready <= 1'b1;
 
                 if (control_sel) begin
                     mmio_rdata <= {31'd0, encrypt_requested};
                     if (mem_wstrb[0])
                         encrypt_requested <= mem_wdata[0];
-                end else begin
+                end else if (status_sel) begin
                     mmio_rdata <= {
                         27'd0,
                         cpu_trap,
                         status_sync
                     };
+                end else if (camera_cfg_command_sel) begin
+                    mmio_rdata <= {23'd0, camera_cfg_count_hold};
+
+                    if (mem_wstrb[3] && mem_wdata[30])
+                        camera_cfg_rejected <= 1'b0;
+
+                    if (mem_wstrb[3] && mem_wdata[31]) begin
+                        if (camera_cfg_locked ||
+                            !camera_cfg_command_count_valid) begin
+                            camera_cfg_rejected <= 1'b1;
+                        end else begin
+                            camera_cfg_count_hold <=
+                                camera_cfg_command_count;
+                            camera_cfg_request_toggle <=
+                                ~camera_cfg_request_toggle;
+                        end
+                    end else if ((|mem_wstrb[1:0]) &&
+                                 !(mem_wstrb[3] && mem_wdata[30])) begin
+                        if (camera_cfg_locked ||
+                            !camera_cfg_command_count_valid)
+                            camera_cfg_rejected <= 1'b1;
+                        else
+                            camera_cfg_count_hold <=
+                                camera_cfg_command_count;
+                    end
+                end else if (camera_cfg_status_sel) begin
+                    mmio_rdata <= {
+                        15'd0,
+                        camera_cfg_index_sync,
+                        5'd0,
+                        camera_cfg_rejected,
+                        camera_cfg_completed,
+                        camera_cfg_locked
+                    };
+                end else begin
+                    // Configuration-table reads deliberately return zero:
+                    // readback would require a third EBR port.
+                    mmio_rdata <= 32'd0;
+                    if ((|mem_wstrb[1:0]) && camera_cfg_locked)
+                        camera_cfg_rejected <= 1'b1;
                 end
             end
         end

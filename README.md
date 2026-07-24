@@ -24,8 +24,8 @@ Top-level entity: **`icebreaker_st7789_top`** (`icebreaker_st7789_top.v`).
 | Path | Role |
 |---|---|
 | `icebreaker_st7789_top.v` | Top level: PLL, POR/reset, CPU clock/CDC, camera XCLK, integration, SB_IO pin cells, status LEDs |
-| `camera_control_soc.v` | Reduced PicoSoC-style RV32I control subsystem, safe boot ROM, memory map, and camera MMIO |
-| `cam_init.v` | OV7670 SCCB (I²C-like) master — writes the register table on power-up |
+| `camera_control_soc.v` | Reduced PicoSoC-style RV32I subsystem, camera MMIO, dual-clock configuration EBR, CDC, SRAM, flash, and UART |
+| `cam_init.v` | OV7670 SCCB (I²C-like) master — transmits a firmware-staged register table on `APPLY` |
 | `cam_capture.v` | Synchronizes PCLK/HREF/VSYNC, assembles RGB565 bytes, crops 320→280 columns |
 | `frame_stream_gate.v` | Atomically accepts a frame only when the display is ready; drops busy-time frames without flushing/mixing FIFO data |
 | `pixel_xor_stage.v` | Per-frame seed generator, frame-safe bypass mux, and pixel/XOR-map integration |
@@ -75,6 +75,7 @@ icebreaker_st7789_top                        (PLL, POR/reset, XCLK gen, LEDs, pi
 ├─ camera_control_soc  "control_soc"           RV32I CPU, MMIO, SRAM, flash, UART
 │    ├─ picorv32  "cpu"                       reduced PicoRV32 core
 │    ├─ ice40up5k_spram  "memory"             128 KiB CPU scratch RAM
+│    ├─ camera_config_mem                       256×16 dual-clock configuration EBR
 │    ├─ spimemio  "flash"                     onboard SPI-flash execute-in-place
 │    └─ simpleuart  "uart"                     PicoSoC-compatible UART
 │
@@ -84,7 +85,7 @@ icebreaker_st7789_top                        (PLL, POR/reset, XCLK gen, LEDs, pi
 ├─ SB_IO  "cam_siod_io"                       [iCE40 primitive] open-drain SCCB data pin
 │
 ├─ cam_capture  "capture"                     RGB565 capture / crop / frame-sync
-│    (enable = stream_enable = cam_cfg_done && lcd_init_done)
+│    (enable = cam_cfg_done && lcd_init_done && !cam_cfg_pending)
 │
 ├─ frame_stream_gate  "frame_gate"             accept ready frames / drop busy frames
 │
@@ -129,7 +130,7 @@ flowchart LR
     XCLKW --> CAM["OV7670 camera"]
 
     SCCB["cam_init\n(SCCB master)"] <-- "sioc / siod" --> CAM
-    SCCB -- cam_cfg_done --> EN{{stream_enable\n= cfg_done AND init_done}}
+    SCCB -- cam_cfg_done --> EN{{stream_enable\n= cfg_done AND init_done\nAND NOT cfg_pending}}
 
     CAM -- "cam_d[7:0], pclk, href, vsync" --> CAP["cam_capture\n(sync, RGB565 assemble,\n320→280 crop)"]
     EN -. enable .-> CAP
@@ -137,6 +138,9 @@ flowchart LR
     CAP -- "pix_wr + frame_sync" --> GATE["frame_stream_gate\naccept only when LCD ready"]
     CTRL -. stream_active .-> GATE
     CPUCLK --> SOC["camera_control_soc\nPicoRV32 + MMIO"]
+    SOC --> CFGRAM["camera config RAM\n256×16 dual-clock EBR"]
+    CFGRAM -- "{register,value}" --> SCCB
+    SOC -- "APPLY + count\nrequest/ack CDC" --> SCCB
     SOC -- "control[0]\n2-FF CDC" --> ENC
     CAP -- "pix_data[15:0]" --> ENC["pixel_xor_stage\nframe seed + XOR/bypass"]
     GATE -- "accepted pixel valid" --> ENC
@@ -161,9 +165,9 @@ flowchart LR
 
 The camera/display datapath runs entirely in `clk_sys` (39.00 MHz) —
 `cam_pclk` is sampled as synchronized *data*, never used as an RTL clock.
-PicoRV32 runs independently at 9.75 MHz. Stable control/status levels cross
-between the CPU and video domains through two-flop synchronizers; encryption
-is still committed only at an accepted frame boundary.
+PicoRV32 runs independently at 9.75 MHz. Stable telemetry crosses through
+two-flop synchronizers; camera `APPLY` uses a request/acknowledge toggle and
+encryption is still committed only at an accepted frame boundary.
 
 ---
 
@@ -190,15 +194,28 @@ retired-instruction counters are enabled for compatibility with the upstream
 PicoSoC firmware prompt and benchmark commands. Firmware targets `rv32i` with
 the `ilp32` ABI.
 
-The initial camera register map is:
+The camera MMIO map is:
 
 | Address | Access | Description |
 |---:|:---:|---|
 | `0x0300_0000` | RW | Camera control; bit 0 is `0=bypass`, `1=encrypt` |
 | `0x0300_0004` | RO | Status: bit 0 encryption active, bit 1 ready, bit 2 streaming, bit 3 fault, bit 4 CPU trap |
+| `0x0300_0008` | RW | Configuration command: bits 8:0 entry count (1–256), bit 30 clears `REJECTED`, bit 31 is write-one `APPLY` |
+| `0x0300_000C` | RO | Configuration status: bit 0 busy/locked, bit 1 completed, bit 2 rejected, bits 16:8 current entry index |
+| `0x0300_1000`–`0x0300_13FC` | WO | 256 configuration slots; low 16 bits of each 32-bit slot are `{OV7670 register, value}` |
 
 Writes honor PicoRV32 byte strobes. The requested encryption level crosses to
-`clk_sys` and is applied only at the next accepted frame boundary.
+`clk_sys` and is applied only at the next accepted frame boundary. The
+configuration table uses one dual-clock iCE40 EBR: PicoRV32 owns its write
+port and `cam_init` owns its synchronous read port. It is intentionally
+write-only from the CPU side because readback would require a third RAM port.
+
+Writing `APPLY|count` locks the table immediately. The video side inhibits
+the next frame, waits for any currently armed camera frame and LCD transfer
+to finish, and then starts SCCB. Writes or a second `APPLY` while locked are
+acknowledged but ignored and set the sticky `REJECTED` status bit. Completion
+unlocks the table and resumes capture. This makes ordinary runtime table
+changes frame-safe.
 
 The normal Makefile build sets `RISCV_BOOT_FROM_FLASH=1`, so reset fetches
 firmware from onboard-flash offset `0x0010_0000`. CPU SRAM is 128 KiB; the
@@ -208,6 +225,8 @@ UART and flash-controller registers retain the upstream PicoSoC addresses
 For a hardware-only image, run `make BOOT_FROM_FLASH=0 hardware`. That selects
 the four-instruction internal safety stub, which writes
 `ENCRYPTION_DEFAULT` to `0x0300_0000` and loops instead of executing flash.
+It cannot populate the camera table, so camera configuration and video remain
+disabled in that safety-stub build.
 
 ### Why 39.00 MHz and not higher
 
@@ -219,8 +238,8 @@ the four-instruction internal safety stub, which writes
   cells for MOSI/DC, the extra IO logic shifted placement enough that the
   design's recurring critical path — the asynchronous `BTN_N → tft_cs`
   path — only cleared 42.00 MHz by a 0.17% margin: reproducible, but too
-  close to real silicon PVT variation to trust. 39.00 MHz with the new SPI
-  engine reproducibly closes with a 43.25 MHz max (10.9% margin), so the
+  close to real silicon PVT variation to trust. The current 39.00 MHz design
+  closes at 41.95 MHz (7.6% margin), so the
   PLL was left at the safe baseline and all further speed came from the SPI
   engine and `CLKRC` instead.
 - The DDR/NEG_TRIGGER phase relationship in `spi_stream_tx.v` was verified
@@ -254,7 +273,7 @@ result:
    around `SB_IO` DDR/NEG_TRIGGER cells doubled SPI to a full `clk_sys`, but
    changed placement pressure enough that 42.00 MHz's `BTN_N→tft_cs` margin
    collapsed to 0.17%. Reverting the PLL to 39.00 MHz restored a 10.9%
-   margin with the new SPI engine in place.
+   margin at that stage; the current integrated build closes with 7.6%.
 6. **`CLKRC` tightened `/3 → /2`** — safe now that SPI runs twice as fast;
    `CLKRC=/1` (bypass) was checked and rejected (camera would outrun the
    display even at the new SPI rate). Line-time margin actually *grew*
@@ -343,8 +362,65 @@ scrambled RGB565 values while the stage is enabled. This XOR map is a linear,
 requiring confidentiality should use a reviewed cipher and proper key/nonce
 management.
 
+### Firmware-defined camera configuration
+
+The previous synthesised ROM is gone. The exact 118-entry default table now
+lives in `ov7670_default_config[]` in `firmware/firmware.c`. At boot,
+`camera_configure_default()` copies it into the MMIO table and issues a
+nonblocking `APPLY`; `cam_init` then transmits exactly the requested count.
+For experiments, define another packed table and apply it with the same
+hardware:
+
+```c
+static const uint32_t my_camera_config[] = {
+	OV7670_REG(0x12, 0x80), /* COM7 reset */
+	OV7670_REG(0x12, 0x14), /* QVGA + RGB */
+	/* ... */
+};
+
+camera_configure(my_camera_config,
+	sizeof(my_camera_config) / sizeof(my_camera_config[0]));
+```
+
+Tables may contain 1–256 entries. `camera_configure()` returns after the
+request is accepted, not after SCCB finishes; use configuration status bit 0
+or UART command `C` to observe progress. `cam_init` gives any COM7 write with
+reset bit 7 set the long reset delay based on the entry value, so reset writes
+can appear anywhere in a custom table. UART command `R` reloads the default
+table and exercises the same live-reconfiguration path.
+
+Frame-safe reconfiguration assumes an accepted 280×240 frame eventually
+finishes. A deliberately incompatible timing/resolution table can leave the
+LCD waiting for pixels that never arrive; in that case use `BTN_N` to reset
+the pipeline after programming corrected firmware. `APPLY` does not forcibly
+cut off an in-flight SPI transfer.
+
+### Runtime colour presets
+
+The firmware includes three nine-write colour-only patches so the live
+configuration path has an immediately visible test:
+
+| UART | Preset | Matrix magnitude | Intended result |
+|:---:|---|---:|---|
+| `N` | normal | 100% (original values) | Restore the proven colour matrix |
+| `L` | muted | approximately 50% | Clearly reduced colour saturation |
+| `V` | vivid test | approximately 150%, clipped at `0xFF` | Deliberately strong colours for an obvious A/B check |
+
+Each patch writes `COM13`, `COM16`, `MTX1`–`MTX6`, and `MTXS`. It does not
+reset the camera or touch clocks, resolution, windowing, scaling, or RGB565
+format. `SATCTR` stays at the default `0x60`: its low nibble is used by the
+camera's automatic UV-saturation adjustment, while scaling the signed colour
+matrix provides a deterministic saturation experiment. The vivid preset is
+intentionally aggressive and may clip highly saturated colours; it is a
+diagnostic setting rather than a calibrated image-quality recommendation.
+
+Preset requests use the same frame-safe, nonblocking `APPLY` path as every
+other runtime table. UART command `C` reports the requested preset and whether
+the SCCB transfer is still applying. UART command `R` still reloads the full
+118-entry default configuration and returns the tracked preset to normal.
+
 Key OV7670 register deltas from the stock reference table (full table in
-`cam_init.v`):
+`firmware/firmware.c`):
 
 | Register | Value | Purpose |
 |---|---:|---|
@@ -367,8 +443,8 @@ parameters, AWB tuning, pixel correction/edge enhancement, or the gamma
 curve — those all sat at chip reset defaults, which on the OV7670 tends to
 show up as a purple/magenta color cast, exposure hunting or visible banding
 under artificial light, salt-and-pepper pixel noise, and flat/washed-out
-contrast. `cam_init.v` now appends a second block of register writes
-(entries 61–117 of the ROM) sourced verbatim from the mainline Linux kernel
+contrast. The default firmware table includes a second block of register
+writes (entries 61–117) sourced verbatim from the mainline Linux kernel
 `ov7670` driver's default register set — the most widely deployed,
 long-proven OV7670 tuning reference — restricted to registers that don't
 touch this design's timing-critical settings (`CLKRC`, `COM7`, `COM3`,
@@ -382,11 +458,10 @@ touch this design's timing-critical settings (`CLKRC`, `COM7`, `COM3`,
 | Pixel correction / edge | `EDGE`, `0x75`, `REG76`, `0x4B`, `0x77`, `0xC9` | `REG76` in particular suppresses white/black speckle noise |
 | Gamma curve | `GAM1-15`/`SLOP` (`0x7A-0x89`) | Replaces the flat reset-default tone curve with a standard contrast curve |
 
-`N_ENTRIES` grew from 61 to 118 and the ROM index (`idx`, the `rom()`
-function's input) widened from 6 to 7 bits to address the larger table.
-Total SCCB table time grows from ~150 ms to ~290 ms — still comfortably
-under the ST7789's own ~500 ms init, so no re-tuning of `BOOT_TICKS`/
-`GAP_TICKS`/`RST_TICKS` was needed.
+The default count is 118. Its complete SCCB transfer takes about 297 ms,
+still comfortably under the ST7789's own roughly 500 ms initialization.
+The hardware count and index are nine bits wide, allowing a full 256-entry
+table without changing the FPGA image.
 
 `COM9` (AGC gain ceiling) was deliberately left at its existing `0x38`
 (16× ceiling) rather than the Linux driver's more conservative `0x18` (4×):
@@ -457,9 +532,15 @@ Required FPGA tools are `yosys`, `nextpnr-ice40`, `icepack`, `iceprog`,
 elsewhere.
 
 ```sh
+make deploy       # synthesize/compile and program both images; no tests
+make synthesis    # synthesize, place, route, and pack the FPGA bitstream
+make load-bitstream   # synthesize if needed, then program the FPGA image
+make compile-firmware # compile the RV32I firmware without programming it
+make load-firmware    # compile if needed, then program firmware at 1 MiB
 make              # build flash-boot FPGA image and RV32I firmware
 make firmware     # ELF, map, disassembly, Verilog hex, and raw flash binary
 make hardware     # yosys -> nextpnr-ice40 -> icepack
+make cam-init-sim # programmable SCCB table/re-apply unit test
 make sim          # RTL SPI-flash boot, UART, and camera-MMIO test
 make synsim       # synthesized-SoC flash-boot/MMIO smoke test
 make check-all    # firmware + RTL sim + hardware + synthesized sim
@@ -469,6 +550,21 @@ make prog-fw      # update only firmware at flash offset 1 MiB
 make timing
 make clean        # remove generated files under build/
 ```
+
+Because the FPGA/firmware MMIO contract changed, program both once with
+`make deploy` (the existing `make prog` target performs the same operation).
+This target
+does not run simulations or `check-all`: it only builds and programs the two
+images. After that, camera-table experiments only require editing
+`firmware.c` and running `make load-firmware`; the FPGA bitstream can remain
+unchanged.
+
+The PicoRV32 reset address is `0x0010_0000`. Firmware is programmed at the
+matching 1 MiB offset in the onboard SPI flash and executed directly from
+there; this design does not currently copy firmware into a dedicated on-chip
+instruction RAM. Override the programming offset with
+`FW_FLASH_OFFSET=<iceprog offset>` only if the RTL/linker map is changed to
+match.
 
 The build targets `up5k-sg48` and asks nextpnr to close timing at 39.00 MHz
 (`Makefile` `FREQ`), constrains `clk_cpu` to 9.75 MHz, and pins nextpnr seed 1
@@ -498,7 +594,11 @@ and adds:
 
 - `E`: request encrypted video;
 - `B`: request bypass video;
-- `C`: print camera request and live status.
+- `C`: print camera, stream, and configuration progress/status;
+- `R`: reload and apply the full default camera configuration;
+- `N`: apply the normal colour matrix;
+- `L`: apply the muted, approximately half-strength colour matrix;
+- `V`: apply the deliberately vivid colour matrix.
 
 Encryption changes still take effect only at the next accepted frame
 boundary.
@@ -507,8 +607,9 @@ boundary.
 
 ## 9. Status LEDs, reset, and backlight
 
-- **Green LED on** — both initializers finished (`stream_enable`: SCCB
-  camera config done **and** ST7789 init done).
+- **Green LED on** — both initializers finished and no camera `APPLY` is
+  pending (`stream_enable`: SCCB config done, ST7789 init done, and table not
+  pending).
 - **Red LED on** — sticky fault: FIFO overflow, FIFO underflow, or a new
   camera frame being rejected because the previous panel transfer has not
   completed. Stays latched until reset.
@@ -530,8 +631,8 @@ boundary.
 ## 10. Bring-up checklist
 
 1. Verify `cam_xclk` is approximately 19.500 MHz.
-2. Verify `cam_sioc` activity after reset and that the green LED eventually
-   turns on.
+2. Program both the new FPGA image and firmware, verify `cam_sioc` activity
+   after firmware boots, and check that the green LED eventually turns on.
 3. Verify `cam_pclk` is approximately 4.875 MHz during active video. A much
    higher value usually means `CLKRC` or `DBLV` did not take effect.
 4. Verify `tft_scl` (SCLK) is a clean ~39 MHz square wave while streaming,
@@ -554,18 +655,26 @@ boundary.
 
 The flash-boot CPU/video design has been synthesized, placed, routed, and
 packed with the installed OSS CAD Suite. Yosys reports zero structural
-problems, 2,876 `SB_LUT4` cells, seven `SB_RAM40_4K` blocks, and four
-`SB_SPRAM256KA` blocks. The routed seed-1 design uses 3,480/5,280 logic cells
-(65%) and meets both clocks: 45.52 MHz estimated maximum for the required
-39.00 MHz video domain, and 24.02 MHz for the required 9.75 MHz CPU domain.
+problems, 2,975 `SB_LUT4` cells, seven `SB_RAM40_4K` blocks, and four
+`SB_SPRAM256KA` blocks. The routed seed-1 design uses 3,702/5,280 logic cells
+(70%) and meets both clocks: 41.95 MHz estimated maximum for the required
+39.00 MHz video domain, and 22.79 MHz for the required 9.75 MHz CPU domain.
+The new 256×16 configuration table replaces the former fixed camera ROM in
+one EBR, so total EBR use remains seven.
 
 GCC 16.1 builds the adapted firmware as an ELF32 RV32I executable with entry
-point `0x0010_0000`; the physical flash binary is 6,676 bytes. The RTL
-simulation boots that firmware through the SPI-flash model, sends ENTER and
-the `E` command through the UART, and observes camera encryption being set
-without a CPU trap. A synthesized-SoC simulation independently boots a
-minimal build of the same C camera-control function and observes the same
-MMIO write.
+point `0x0010_0000`; the physical flash binary is 8,568 bytes. The RTL
+simulation boots that firmware through the SPI-flash model, verifies selected
+entries across the complete 118-entry MMIO table, sends ENTER, `V`, and `E`
+through the UART, verifies every entry of the vivid patch across a second
+`APPLY` through the MMIO/CDC bridge, and observes encryption without a CPU
+trap.
+The synthesized-SoC simulation repeats the table-write/read-port and
+encryption checks against the mapped EBR and post-synthesis logic.
+
+`make cam-init-sim` separately verifies SCCB serialization from a synchronous
+external memory, content-based COM7 reset delay, a second runtime `APPLY`,
+the full 256-entry boundary, and fail-closed handling above that boundary.
 
 Behavioral tests exercised a complete rejected 280×240 frame (all 67,200
 pixel strobes suppressed without altering the retained FIFO/map state) and

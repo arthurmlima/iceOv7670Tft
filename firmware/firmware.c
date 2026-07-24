@@ -43,6 +43,9 @@ extern uint32_t sram;
 #define reg_uart_data (*(volatile uint32_t*)0x02000008)
 #define reg_camera_control (*(volatile uint32_t*)0x03000000)
 #define reg_camera_status (*(volatile const uint32_t*)0x03000004)
+#define reg_camera_config_command (*(volatile uint32_t*)0x03000008)
+#define reg_camera_config_status (*(volatile const uint32_t*)0x0300000c)
+#define reg_camera_config_table ((volatile uint32_t*)0x03001000)
 
 #define CAMERA_CTRL_ENCRYPT          (1u << 0)
 
@@ -52,6 +55,19 @@ extern uint32_t sram;
 #define CAMERA_STATUS_STREAM_FAULT   (1u << 3)
 #define CAMERA_STATUS_CPU_TRAP       (1u << 4)
 
+#define CAMERA_CONFIG_CAPACITY       256u
+#define CAMERA_CONFIG_COMMAND_APPLY  (1u << 31)
+#define CAMERA_CONFIG_COMMAND_CLEAR_REJECTED (1u << 30)
+
+#define CAMERA_CONFIG_STATUS_BUSY     (1u << 0)
+#define CAMERA_CONFIG_STATUS_DONE     (1u << 1)
+#define CAMERA_CONFIG_STATUS_REJECTED (1u << 2)
+#define CAMERA_CONFIG_STATUS_INDEX_SHIFT 8
+#define CAMERA_CONFIG_STATUS_INDEX_MASK  (0x1ffu << CAMERA_CONFIG_STATUS_INDEX_SHIFT)
+
+#define OV7670_REG(reg, value) \
+	((((uint32_t)(reg) & 0xffu) << 8) | ((uint32_t)(value) & 0xffu))
+
 #ifndef UART_CLKDIV
 #define UART_CLKDIV 85
 #endif
@@ -59,6 +75,213 @@ extern uint32_t sram;
 #ifndef PROMPT_TIMEOUT_CYCLES
 #define PROMPT_TIMEOUT_CYCLES 9750000
 #endif
+
+/*
+ * Default QVGA/RGB565 camera setup formerly synthesized as the ROM in
+ * cam_init.v. Each element is one naturally aligned MMIO store; only its low
+ * 16 bits are implemented in the FPGA table RAM.
+ *
+ * Keep timing-critical values (CLKRC, COM7, COM3, COM14, scaling, and DBLV)
+ * coordinated with timing_check.py. Other tables can be substituted at
+ * runtime with camera_configure().
+ */
+static const uint32_t ov7670_default_config[] = {
+	OV7670_REG(0x12, 0x80), /* COM7: soft reset */
+	OV7670_REG(0x12, 0x80), /* repeated as in the proven configuration */
+	OV7670_REG(0x12, 0x14), /* COM7: QVGA + RGB */
+	OV7670_REG(0x11, 0x01), /* CLKRC: XCLK / 2 */
+	OV7670_REG(0x0c, 0x04), /* COM3: DCW enable */
+	OV7670_REG(0x3e, 0x19), /* COM14: manual scale, PCLK / 2 */
+	OV7670_REG(0x8c, 0x00), /* RGB444 disable */
+	OV7670_REG(0x04, 0x00), /* COM1 */
+	OV7670_REG(0x40, 0xd0), /* COM15: full-range RGB565 */
+	OV7670_REG(0x3a, 0x04), /* TSLB */
+	OV7670_REG(0x14, 0x38), /* COM9: 16x AGC ceiling */
+	OV7670_REG(0x4f, 0xb3),
+	OV7670_REG(0x50, 0xb3),
+	OV7670_REG(0x51, 0x00),
+	OV7670_REG(0x52, 0x3d),
+	OV7670_REG(0x53, 0xa7),
+	OV7670_REG(0x54, 0xe4),
+	OV7670_REG(0x58, 0x9e),
+	OV7670_REG(0x3d, 0xc0), /* COM13 */
+	OV7670_REG(0x11, 0x01),
+	OV7670_REG(0x17, 0x11), /* HSTART */
+	OV7670_REG(0x18, 0x61), /* HSTOP */
+	OV7670_REG(0x32, 0xa4), /* HREF */
+	OV7670_REG(0x19, 0x03), /* VSTART */
+	OV7670_REG(0x1a, 0x7b), /* VSTOP */
+	OV7670_REG(0x03, 0x0a), /* VREF */
+	OV7670_REG(0x0e, 0x61),
+	OV7670_REG(0x0f, 0x4b),
+	OV7670_REG(0x16, 0x02),
+	OV7670_REG(0x1e, 0x34), /* MVFP */
+	OV7670_REG(0x21, 0x02),
+	OV7670_REG(0x22, 0x91),
+	OV7670_REG(0x29, 0x07),
+	OV7670_REG(0x33, 0x0b),
+	OV7670_REG(0x35, 0x0b),
+	OV7670_REG(0x37, 0x1d),
+	OV7670_REG(0x38, 0x71),
+	OV7670_REG(0x39, 0x2a),
+	OV7670_REG(0x3c, 0x78),
+	OV7670_REG(0x4d, 0x40),
+	OV7670_REG(0x4e, 0x20),
+	OV7670_REG(0x69, 0x00),
+	OV7670_REG(0x6b, 0x0a), /* DBLV: PLL bypass */
+	OV7670_REG(0x74, 0x10),
+	OV7670_REG(0x8d, 0x4f),
+	OV7670_REG(0x8e, 0x00),
+	OV7670_REG(0x8f, 0x00),
+	OV7670_REG(0x90, 0x00),
+	OV7670_REG(0x91, 0x00),
+	OV7670_REG(0x96, 0x00),
+	OV7670_REG(0x9a, 0x00),
+	OV7670_REG(0xb0, 0x84),
+	OV7670_REG(0xb1, 0x0c),
+	OV7670_REG(0xb2, 0x0e),
+	OV7670_REG(0xb3, 0x82),
+	OV7670_REG(0xb8, 0x0a),
+	OV7670_REG(0x70, 0x3a), /* QVGA scaling */
+	OV7670_REG(0x71, 0x35),
+	OV7670_REG(0x72, 0x11),
+	OV7670_REG(0x73, 0xf1),
+	OV7670_REG(0xa2, 0x02),
+
+	/* AEC/banding and auto-control tuning. */
+	OV7670_REG(0x24, 0x95),
+	OV7670_REG(0x25, 0x33),
+	OV7670_REG(0x26, 0xe3),
+	OV7670_REG(0x3b, 0x03),
+	OV7670_REG(0xa5, 0x05),
+	OV7670_REG(0xab, 0x07),
+	OV7670_REG(0x9f, 0x78),
+	OV7670_REG(0xa0, 0x68),
+	OV7670_REG(0xa1, 0x03),
+	OV7670_REG(0xa6, 0xd8),
+	OV7670_REG(0xa7, 0xd8),
+	OV7670_REG(0xa8, 0xf0),
+	OV7670_REG(0xa9, 0x90),
+	OV7670_REG(0xaa, 0x94),
+	OV7670_REG(0x13, 0xff), /* COM8: AGC/AEC/AWB */
+
+	/* AWB tuning. */
+	OV7670_REG(0x01, 0x40),
+	OV7670_REG(0x02, 0x60),
+	OV7670_REG(0x43, 0x0a),
+	OV7670_REG(0x44, 0xf0),
+	OV7670_REG(0x45, 0x34),
+	OV7670_REG(0x46, 0x58),
+	OV7670_REG(0x47, 0x28),
+	OV7670_REG(0x48, 0x3a),
+	OV7670_REG(0x59, 0x88),
+	OV7670_REG(0x5a, 0x88),
+	OV7670_REG(0x5b, 0x44),
+	OV7670_REG(0x5c, 0x67),
+	OV7670_REG(0x5d, 0x49),
+	OV7670_REG(0x5e, 0x0e),
+	OV7670_REG(0x6c, 0x0a),
+	OV7670_REG(0x6d, 0x55),
+	OV7670_REG(0x6e, 0x11),
+	OV7670_REG(0x6f, 0x9f),
+	OV7670_REG(0x6a, 0x40),
+	OV7670_REG(0x41, 0x38), /* COM16: AWB gain */
+
+	/* Pixel correction and edge enhancement. */
+	OV7670_REG(0x3f, 0x00),
+	OV7670_REG(0x75, 0x05),
+	OV7670_REG(0x76, 0xe1),
+	OV7670_REG(0x4b, 0x09),
+	OV7670_REG(0x77, 0x01),
+	OV7670_REG(0xc9, 0x60),
+
+	/* Gamma curve (0x7a..0x89). */
+	OV7670_REG(0x7a, 0x20),
+	OV7670_REG(0x7b, 0x10),
+	OV7670_REG(0x7c, 0x1e),
+	OV7670_REG(0x7d, 0x35),
+	OV7670_REG(0x7e, 0x5a),
+	OV7670_REG(0x7f, 0x69),
+	OV7670_REG(0x80, 0x76),
+	OV7670_REG(0x81, 0x80),
+	OV7670_REG(0x82, 0x88),
+	OV7670_REG(0x83, 0x8f),
+	OV7670_REG(0x84, 0x96),
+	OV7670_REG(0x85, 0xa3),
+	OV7670_REG(0x86, 0xaf),
+	OV7670_REG(0x87, 0xc4),
+	OV7670_REG(0x88, 0xd7),
+	OV7670_REG(0x89, 0xe8),
+};
+
+#define OV7670_DEFAULT_CONFIG_COUNT \
+	(sizeof(ov7670_default_config) / sizeof(ov7670_default_config[0]))
+
+typedef char ov7670_default_config_must_fit[
+	(OV7670_DEFAULT_CONFIG_COUNT <= CAMERA_CONFIG_CAPACITY) ? 1 : -1];
+
+/*
+ * Runtime colour-only patches. Saturation is adjusted by scaling the signed
+ * colour-matrix magnitudes while preserving MTXS (the coefficient sign bits).
+ * COM13 keeps gamma/automatic UV saturation enabled, COM16 keeps matrix
+ * doubling disabled, and SATCTR remains at the proven 0x60 from the default
+ * table because its low nibble is an automatic-adjustment result.
+ *
+ * These deliberately avoid clock, window, scaling, and output-format
+ * registers, so switching presets cannot change the expected frame geometry.
+ */
+static const uint32_t ov7670_color_normal[] = {
+	OV7670_REG(0x3d, 0xc0), /* COM13: gamma + automatic UV saturation */
+	OV7670_REG(0x41, 0x38), /* COM16: matrix doubling disabled */
+	OV7670_REG(0x4f, 0xb3), /* MTX1 */
+	OV7670_REG(0x50, 0xb3), /* MTX2 */
+	OV7670_REG(0x51, 0x00), /* MTX3 */
+	OV7670_REG(0x52, 0x3d), /* MTX4 */
+	OV7670_REG(0x53, 0xa7), /* MTX5 */
+	OV7670_REG(0x54, 0xe4), /* MTX6 */
+	OV7670_REG(0x58, 0x9e), /* MTXS: coefficient signs */
+};
+
+static const uint32_t ov7670_color_muted[] = {
+	OV7670_REG(0x3d, 0xc0),
+	OV7670_REG(0x41, 0x38),
+	OV7670_REG(0x4f, 0x5a), /* approximately 50% matrix magnitude */
+	OV7670_REG(0x50, 0x5a),
+	OV7670_REG(0x51, 0x00),
+	OV7670_REG(0x52, 0x1f),
+	OV7670_REG(0x53, 0x54),
+	OV7670_REG(0x54, 0x72),
+	OV7670_REG(0x58, 0x9e),
+};
+
+static const uint32_t ov7670_color_vivid[] = {
+	OV7670_REG(0x3d, 0xc0),
+	OV7670_REG(0x41, 0x38),
+	OV7670_REG(0x4f, 0xff), /* approximately 150%, clipped for a clear test */
+	OV7670_REG(0x50, 0xff),
+	OV7670_REG(0x51, 0x00),
+	OV7670_REG(0x52, 0x5c),
+	OV7670_REG(0x53, 0xfb),
+	OV7670_REG(0x54, 0xff),
+	OV7670_REG(0x58, 0x9e),
+};
+
+#define OV7670_COLOR_CONFIG_COUNT \
+	(sizeof(ov7670_color_normal) / sizeof(ov7670_color_normal[0]))
+
+typedef char ov7670_color_configs_must_match[
+	((sizeof(ov7670_color_muted) == sizeof(ov7670_color_normal)) &&
+	 (sizeof(ov7670_color_vivid) == sizeof(ov7670_color_normal)) &&
+	 (OV7670_COLOR_CONFIG_COUNT <= CAMERA_CONFIG_CAPACITY)) ? 1 : -1];
+
+enum camera_color_preset {
+	CAMERA_COLOR_NORMAL,
+	CAMERA_COLOR_MUTED,
+	CAMERA_COLOR_VIVID,
+};
+
+static enum camera_color_preset camera_color_preset_requested =
+	CAMERA_COLOR_NORMAL;
 
 // --------------------------------------------------------
 
@@ -240,6 +463,115 @@ void print_dec(uint32_t v)
 	else putchar('0');
 }
 
+uint32_t camera_config_get_status()
+{
+	return reg_camera_config_status;
+}
+
+bool camera_config_load(const uint32_t *entries, uint32_t count)
+{
+	if (count == 0 || count > CAMERA_CONFIG_CAPACITY)
+		return false;
+
+	if (camera_config_get_status() & CAMERA_CONFIG_STATUS_BUSY)
+		return false;
+
+	for (uint32_t i = 0; i < count; i++)
+		reg_camera_config_table[i] = entries[i];
+
+	return true;
+}
+
+bool camera_config_apply(uint32_t count)
+{
+	if (count == 0 || count > CAMERA_CONFIG_CAPACITY)
+		return false;
+
+	if (camera_config_get_status() & CAMERA_CONFIG_STATUS_BUSY)
+		return false;
+
+	reg_camera_config_command =
+		CAMERA_CONFIG_COMMAND_APPLY |
+		CAMERA_CONFIG_COMMAND_CLEAR_REJECTED |
+		count;
+
+	/*
+	 * REJECTED is cleared and APPLY is issued atomically. A very short table
+	 * could finish before the status read below, so acceptance is determined
+	 * from REJECTED rather than requiring BUSY to remain high.
+	 */
+	return (camera_config_get_status() &
+		CAMERA_CONFIG_STATUS_REJECTED) == 0;
+}
+
+bool camera_configure(const uint32_t *entries, uint32_t count)
+{
+	if (!camera_config_load(entries, count))
+		return false;
+
+	return camera_config_apply(count);
+}
+
+bool camera_configure_default()
+{
+	if (!camera_configure(ov7670_default_config,
+			      OV7670_DEFAULT_CONFIG_COUNT))
+		return false;
+
+	camera_color_preset_requested = CAMERA_COLOR_NORMAL;
+	return true;
+}
+
+const char *camera_color_preset_name(enum camera_color_preset preset)
+{
+	switch (preset) {
+	case CAMERA_COLOR_NORMAL:
+		return "normal";
+	case CAMERA_COLOR_MUTED:
+		return "muted";
+	case CAMERA_COLOR_VIVID:
+		return "vivid";
+	default:
+		return "unknown";
+	}
+}
+
+bool camera_configure_color(enum camera_color_preset preset)
+{
+	const uint32_t *entries;
+
+	switch (preset) {
+	case CAMERA_COLOR_NORMAL:
+		entries = ov7670_color_normal;
+		break;
+	case CAMERA_COLOR_MUTED:
+		entries = ov7670_color_muted;
+		break;
+	case CAMERA_COLOR_VIVID:
+		entries = ov7670_color_vivid;
+		break;
+	default:
+		return false;
+	}
+
+	if (!camera_configure(entries, OV7670_COLOR_CONFIG_COUNT))
+		return false;
+
+	camera_color_preset_requested = preset;
+	return true;
+}
+
+void cmd_camera_color(enum camera_color_preset preset)
+{
+	if (camera_configure_color(preset)) {
+		print("Camera colour preset ");
+		print(camera_color_preset_name(preset));
+		print(" accepted.\n");
+	} else {
+		print("Camera configuration busy or rejected.\n");
+	}
+}
+
 void camera_set_encryption(bool enable)
 {
 	uint32_t control = reg_camera_control;
@@ -261,6 +593,7 @@ void cmd_camera_status()
 {
 	uint32_t control = reg_camera_control;
 	uint32_t status = camera_get_status();
+	uint32_t config_status = camera_config_get_status();
 
 	print("Camera request: ");
 	print((control & CAMERA_CTRL_ENCRYPT) ? "encrypt\n" : "bypass\n");
@@ -280,6 +613,28 @@ void cmd_camera_status()
 
 	print("CPU trap: ");
 	print((status & CAMERA_STATUS_CPU_TRAP) ? "yes\n" : "no\n");
+
+	print("Camera config: ");
+	if (config_status & CAMERA_CONFIG_STATUS_BUSY)
+		print("applying\n");
+	else if (config_status & CAMERA_CONFIG_STATUS_DONE)
+		print("ready\n");
+	else
+		print("not applied\n");
+
+	print("Config index/count: ");
+	print_dec((config_status & CAMERA_CONFIG_STATUS_INDEX_MASK) >>
+		  CAMERA_CONFIG_STATUS_INDEX_SHIFT);
+	print("/");
+	print_dec(reg_camera_config_command & 0x1ffu);
+	print("\n");
+
+	print("Config rejected: ");
+	print((config_status & CAMERA_CONFIG_STATUS_REJECTED) ? "yes\n" : "no\n");
+
+	print("Colour preset request: ");
+	print(camera_color_preset_name(camera_color_preset_requested));
+	print("\n");
 }
 
 char getchar_prompt(char *prompt)
@@ -727,6 +1082,14 @@ void cmd_echo()
 #ifdef FIRMWARE_SMOKE_TEST
 void main()
 {
+	reg_camera_config_command = CAMERA_CONFIG_COMMAND_APPLY | 257u;
+	if ((camera_config_get_status() &
+	     (CAMERA_CONFIG_STATUS_BUSY | CAMERA_CONFIG_STATUS_REJECTED)) !=
+	    CAMERA_CONFIG_STATUS_REJECTED)
+		while (1) { /* invalid-count rejection smoke-test failure */ }
+
+	if (!camera_configure_default())
+		while (1) { /* configuration MMIO smoke-test failure */ }
 	camera_set_encryption(true);
 	while (1) { /* synthesized flash-boot/MMIO smoke test */ }
 }
@@ -737,6 +1100,9 @@ void main()
 	print("Booting..\n");
 
 	set_flash_qspi_flag();
+
+	if (!camera_configure_default())
+		print("Camera configuration request was rejected.\n");
 
 	while (getchar_prompt("Press ENTER to continue..\n") != '\r') { /* wait */ }
 
@@ -777,9 +1143,13 @@ void main()
 		print("   [M] Run Memtest\n");
 		print("   [S] Print SPI state\n");
 		print("   [e] Echo UART\n");
-		print("   [E] Request encrypted video\n");
-		print("   [B] Request bypass video\n");
+		print("   [E] Encrypted video\n");
+		print("   [B] Decrypted video\n");
 		print("   [C] Print camera status\n");
+		print("   [R] Reload default camera configuration\n");
+		print("   [N] Normal camera colours\n");
+		print("   [L] Muted camera colours\n");
+		print("   [V] Vivid camera colours\n");
 		print("\n");
 
 		for (int rep = 10; rep > 0; rep--)
@@ -838,6 +1208,21 @@ void main()
 				break;
 			case 'C':
 				cmd_camera_status();
+				break;
+			case 'R':
+				if (camera_configure_default())
+					print("Camera configuration accepted.\n");
+				else
+					print("Camera configuration busy or rejected.\n");
+				break;
+			case 'N':
+				cmd_camera_color(CAMERA_COLOR_NORMAL);
+				break;
+			case 'L':
+				cmd_camera_color(CAMERA_COLOR_MUTED);
+				break;
+			case 'V':
+				cmd_camera_color(CAMERA_COLOR_VIVID);
 				break;
 			default:
 				continue;

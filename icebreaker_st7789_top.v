@@ -10,10 +10,10 @@
 // below was rebuilt with SB_IO DDR/NEG_TRIGGER cells, the added IO logic
 // shifted placement enough that the unrelated async BTN_N -> tft_cs path
 // (this design's recurring critical path) only cleared 42.00 MHz by 0.17%
-// margin -- reproducible, but too close to PVT variation to trust on real
-// hardware. 39.00 MHz with the new SPI engine reproducibly closes with
-// 43.25 MHz max (10.9% margin), so the PLL was left at the safe baseline
-// and all the speed gain was taken from the SPI/CLKRC changes instead.
+    // margin -- reproducible, but too close to PVT variation to trust on real
+    // hardware. The current 39.00 MHz design closes at 41.95 MHz (7.6%
+    // margin), so the PLL was left at the safe baseline
+    // and all the speed gain was taken from the SPI/CLKRC changes instead.
 //
 // SPI now runs at a full sys_clk = 39.00 MHz (double the previous sys_clk/2
 // ceiling) via an SB_IO DDR output cell for SCLK plus NEG_TRIGGER cells for
@@ -194,6 +194,13 @@ module icebreaker_st7789_top #(
     // ---------------- SCCB configuration ----------------
     wire cam_siod_low;
     wire cam_cfg_done;
+    wire cam_cfg_busy;
+    wire cam_cfg_start;
+    wire cam_cfg_pending;
+    wire [8:0] cam_cfg_count;
+    wire [8:0] cam_cfg_index;
+    wire [7:0] cam_cfg_addr;
+    wire [15:0] cam_cfg_data;
 
     cam_init #(
         .TICK_DIV   (98),
@@ -201,11 +208,17 @@ module icebreaker_st7789_top #(
         .GAP_TICKS  (800),
         .RST_TICKS  (4000)
     ) camera_config (
-        .clk      (clk_sys),
-        .rst      (rst),
-        .sioc     (cam_sioc),
-        .siod_low (cam_siod_low),
-        .done     (cam_cfg_done)
+        .clk         (clk_sys),
+        .rst         (rst),
+        .start       (cam_cfg_start),
+        .entry_count (cam_cfg_count),
+        .entry_addr  (cam_cfg_addr),
+        .entry_data  (cam_cfg_data),
+        .busy        (cam_cfg_busy),
+        .done        (cam_cfg_done),
+        .entry_index (cam_cfg_index),
+        .sioc        (cam_sioc),
+        .siod_low    (cam_siod_low)
     );
 
     // Open-drain SIOD with an internal pull-up. OUTPUT_ENABLE=1 drives zero;
@@ -225,12 +238,16 @@ module icebreaker_st7789_top #(
     wire lcd_sync_error;
     wire lcd_stream_active;
     wire bl_raw;
-    wire stream_enable = cam_cfg_done && lcd_init_done;
+    // A pending firmware APPLY inhibits the next frame immediately. The
+    // bridge waits for any already-armed capture/LCD transfer to finish
+    // before it starts changing sensor registers.
+    wire stream_enable = cam_cfg_done && lcd_init_done && !cam_cfg_pending;
 
     // ---------------- camera capture ----------------
     wire [15:0] cap_pixel;
     wire        cap_wr;
     wire        cap_frame_sync;
+    wire        cap_frame_active;
 
     cam_capture capture (
         .clk        (clk_sys),
@@ -242,7 +259,8 @@ module icebreaker_st7789_top #(
         .d_i        (cam_d),
         .pix_data   (cap_pixel),
         .pix_wr     (cap_wr),
-        .frame_sync (cap_frame_sync)
+        .frame_sync (cap_frame_sync),
+        .frame_active (cap_frame_active)
     );
 
     // ---------------- atomic camera/display frame acceptance ----------------
@@ -391,6 +409,7 @@ module icebreaker_st7789_top #(
     // Green: both devices initialized. Red: sticky stream/FIFO timing fault.
     wire stream_fault = fifo_overflow || fifo_underflow || lcd_sync_error ||
                         dropped_frame_error;
+    wire cam_cfg_safe = !cap_frame_active && !lcd_stream_active;
     assign LEDG_N = ~stream_enable;
     assign LEDR_N = ~stream_fault;
 
@@ -405,6 +424,17 @@ module icebreaker_st7789_top #(
     ) control_soc (
         .clk               (clk_cpu),
         .resetn            (cpu_resetn),
+        .camera_cfg_clk    (clk_sys),
+        .camera_cfg_resetn (resetn),
+        .camera_cfg_safe   (cam_cfg_safe),
+        .camera_cfg_start  (cam_cfg_start),
+        .camera_cfg_count  (cam_cfg_count),
+        .camera_cfg_data   (cam_cfg_data),
+        .camera_cfg_addr   (cam_cfg_addr),
+        .camera_cfg_busy   (cam_cfg_busy),
+        .camera_cfg_done   (cam_cfg_done),
+        .camera_cfg_index  (cam_cfg_index),
+        .camera_cfg_pending (cam_cfg_pending),
         .encryption_active (encryption_active),
         .stream_ready      (stream_enable),
         .stream_active     (lcd_stream_active),
