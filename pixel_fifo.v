@@ -4,8 +4,9 @@
 // pixel_fifo.v
 //
 // Single-clock 256 x 16 RGB565 FIFO.  The storage is exactly 4096 bits and is
-// written in an inference-friendly synchronous style so yosys maps it to one
-// iCE40UP5K EBR.
+// written in an inference-friendly synchronous style so it maps to one block
+// RAM: an iCE40UP5K EBR under yosys, one GW5A BSRAM under GowinSynthesis.
+// Both vendors' block-RAM hints are attached; each tool ignores the other's.
 //
 // "flush" is asserted at each accepted camera frame boundary.  Overflow and
 // underflow are sticky until reset so they can be shown on an LED.
@@ -31,7 +32,8 @@ module pixel_fifo #(
     output reg           underflow,
     output reg  [AW:0]   level
 );
-    (* ram_style = "block" *) reg [15:0] mem [0:DEPTH-1];
+    (* ram_style = "block", syn_ramstyle = "block_ram" *)
+    reg [15:0] mem [0:DEPTH-1];
     reg [AW-1:0] wr_ptr;
     reg [AW-1:0] rd_ptr;
 

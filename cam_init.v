@@ -20,10 +20,10 @@
 // Register table = the proven camera.h set, with exactly these deltas:
 //
 //   COM7  0x04 -> 0x14   select QVGA as well as RGB
-//   CLKRC 0x00 -> 0x01   internal clock = XCLK/2 = 9.750 MHz
+//   CLKRC 0x00 -> 0x01   internal clock = XCLK/2 = 10.000 MHz
 //   DBLV  0x4A -> 0x0A   PLL x4 OFF (x4 would quadruple everything)
 //   COM3  0x00 -> 0x04   enable DCW              \
-//   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA, PCLK 1.625 MHz
+//   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA, PCLK 5.000 MHz
 //   + 0x70..0x73, 0xA2   canonical scaling regs  /
 //   RGB444 0x03 -> 0x00  RGB444 OFF  \  the old table left the sensor in
 //   COM15  0xF0 -> 0xD0  true RGB565 /  444/555 mode; the panel needs 565
@@ -36,7 +36,7 @@
 // ============================================================================
 
 module cam_init #(
-    parameter TICK_DIV   = 98,     // 39.00 MHz / 98 = 397.96 kHz quarter tick
+    parameter TICK_DIV   = 100,    // 40.00 MHz / 100 = 400 kHz quarter tick
     parameter BOOT_TICKS = 4000,   // ~10 ms after reset before first write
     parameter GAP_TICKS  = 800,    // ~2 ms between writes
     parameter RST_TICKS  = 4000    // ~10 ms settle after COM7 reset writes

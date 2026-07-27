@@ -1,13 +1,14 @@
 `timescale 1ns / 1ps
 `default_nettype none
 // ============================================================================
-// cam_capture.v - OV7670 RGB565 receiver in the 39.00 MHz system domain.
+// cam_capture.v - OV7670 RGB565 receiver in the 40.00 MHz system domain.
 //
-// PCLK is treated as data, not as a clock.  With XCLK=19.500 MHz, CLKRC=/2,
-// and COM14 PCLK=/2, PCLK is about 4.875 MHz.  That leaves 8 system-clock
-// periods per PCLK period, so 2-FF synchronization and edge detection still
-// provide a comfortable sampling window without an asynchronous clock
-// domain (down from a 12-cycle margin at the previous CLKRC=/3 setting).
+// PCLK is treated as data, not as a clock.  With XCLK=20.000 MHz, CLKRC=/2,
+// and COM14 PCLK=/2, PCLK is 5.000 MHz.  That leaves 8 system-clock periods
+// per PCLK period, so 2-FF synchronization and edge detection still provide
+// a comfortable sampling window without an asynchronous clock domain.  The
+// ratio is fixed by the clock tree (PCLK = clk_sys/8), so it is the same 8
+// cycles the 39.00 MHz iCEBreaker build had.
 //
 // OV7670 RGB565 byte order:
 //   byte 0 = {R[4:0], G[5:3]}

@@ -13,8 +13,8 @@
 // SCLK may pause while the FIFO is empty; CS stays low and RAMWR remains active.
 // ============================================================================
 module st7789_camera_ctrl #(
-    parameter integer CLK_HZ       = 39000000,
-    parameter integer SPI_HZ       = 19500000,
+    parameter integer CLK_HZ       = 40000000,
+    parameter integer SPI_HZ       = 40000000,
     parameter integer WIDTH        = 280,
     parameter integer HEIGHT       = 240,
     parameter integer X_SHIFT      = 20,

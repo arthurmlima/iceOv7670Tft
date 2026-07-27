@@ -1,0 +1,117 @@
+// ============================================================================
+// tangprimer25k.cst - Sipeed Tang Primer 25K Dock physical constraints
+//
+// Ball assignments are transcribed from the dock schematic
+// (Tang_Primer_25K_Dock_60033_Schematic.pdf, sheet 1, connectors J4/J5/J6 and
+// the Buttons/LED block) and cross-checked against litex-boards'
+// sipeed_tang_primer_25k platform file and Sipeed's own PMOD examples.
+//
+// PMOD physical pin -> FPGA ball (all three connectors, for reference):
+//
+//        p1   p2   p3   p4   (p5,p6  = GND, +3V3)
+//        p7   p8   p9   p10  (p11,p12= GND, +3V3)
+//
+//   J4   G11  D11  B11  C11        J5   A11  E11  K11  L5
+//        G10  D10  B10  C10             A10  E10  L11  K5
+//
+//   J6   F5   G7   H8   H5
+//        G5   G8   H7   J5
+//
+// Careful: the schematic's connector *symbol* pin numbers are not the header's
+// physical pin numbers (the symbol numbers power on 1-4).  The table above is
+// in physical PMOD numbering, which is what a PMOD module actually plugs into.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Dock board: oscillator, buttons, status LEDs
+// ---------------------------------------------------------------------------
+// E2 is shared with the CPU/SSPI configuration block: build.tcl sets
+// use_cpu_as_gpio and use_sspi_as_gpio to release it.
+IO_LOC  "clk50" E2;
+IO_PORT "clk50" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+
+// S1/S2 are active high: 100R to +3V3 when pressed, internal pull-down
+// otherwise.  S1 = reset, S2 = encryption toggle.
+IO_LOC  "btn_s1" H11;
+IO_PORT "btn_s1" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "btn_s2" H10;
+IO_PORT "btn_s2" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=OFF BANK_VCCIO=3.3;
+
+// The dock has no general-purpose user LED; the READY and DONE configuration
+// status LEDs are repurposed (build.tcl sets use_ready_as_gpio/use_done_as_gpio).
+IO_LOC  "led_ready" E8;
+IO_PORT "led_ready" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "led_done" D7;
+IO_PORT "led_done" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+// ---------------------------------------------------------------------------
+// PMODs J4 + J5 - OV7670
+//
+// The camera's 18-pin (2x9) ribbon header is split one row per PMOD, in the
+// sensor board's own pin order, so a ribbon cable maps straight across:
+//
+//   OV7670 odd  row: 3V3  SIOC  VSYNC PCLK  D7 D5 D3 D1 RESET  -> J4
+//   OV7670 even row: GND  SIOD  HREF  XCLK  D6 D4 D2 D0 PWDN   -> J5
+//
+// The two supply pins come off the PMOD power pins (p6/p12 = +3V3 on J4,
+// p5/p11 = GND on J5), leaving exactly the eight signals per row that a PMOD
+// carries.  Consequence worth noting: the 8-bit data bus is interleaved
+// across two connectors (odd bits on J4, even bits on J5).  That is purely a
+// wiring convenience -- cam_capture samples the bus synchronously and does
+// not care where the bits land.
+// ---------------------------------------------------------------------------
+
+// ---- PMOD J4: OV7670 odd row ----
+IO_LOC  "cam_sioc" G11;           // J4 p1   (SCCB clock, push-pull)
+IO_PORT "cam_sioc" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "cam_vsync" D11;          // J4 p2
+IO_PORT "cam_vsync" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_pclk" B11;           // J4 p3
+IO_PORT "cam_pclk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[7]" C11;           // J4 p4
+IO_PORT "cam_d[7]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[5]" G10;           // J4 p7
+IO_PORT "cam_d[5]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[3]" D10;           // J4 p8
+IO_PORT "cam_d[3]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[1]" B10;           // J4 p9
+IO_PORT "cam_d[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_rst_n" C10;          // J4 p10
+IO_PORT "cam_rst_n" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+// ---- PMOD J5: OV7670 even row ----
+// SIOD is open-drain, driven low only; the pin's pull-up gives the high level.
+IO_LOC  "cam_siod" A11;           // J5 p1   (SCCB data)
+IO_PORT "cam_siod" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "cam_href" E11;           // J5 p2
+IO_PORT "cam_href" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_xclk" K11;           // J5 p3
+IO_PORT "cam_xclk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "cam_d[6]" L5;            // J5 p4
+IO_PORT "cam_d[6]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[4]" A10;           // J5 p7
+IO_PORT "cam_d[4]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[2]" E10;           // J5 p8
+IO_PORT "cam_d[2]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_d[0]" L11;           // J5 p9
+IO_PORT "cam_d[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=OFF BANK_VCCIO=3.3;
+IO_LOC  "cam_pwdn" K5;            // J5 p10
+IO_PORT "cam_pwdn" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+// ---------------------------------------------------------------------------
+// PMOD J6 - ST7789 display
+//
+// Six signals on p1-p4 and p7-p8; J6 p9/p10 (H7/J5) are left unused.
+// ---------------------------------------------------------------------------
+IO_LOC  "tft_blk" F5;             // J6 p1   (backlight)
+IO_PORT "tft_blk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tft_cs" G7;              // J6 p2
+IO_PORT "tft_cs" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tft_dc" H8;              // J6 p3
+IO_PORT "tft_dc" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tft_res" H5;             // J6 p4
+IO_PORT "tft_res" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tft_sda" G5;             // J6 p7   (MOSI)
+IO_PORT "tft_sda" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tft_scl" G8;             // J6 p8   (SCK)
+IO_PORT "tft_scl" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;

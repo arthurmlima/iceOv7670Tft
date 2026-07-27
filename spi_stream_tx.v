@@ -8,21 +8,29 @@
 // pulses whenever a byte is taken; tx_ready is asserted on the final bit of
 // the current byte so the next byte starts without an extra idle cycle.
 //
-// SCLK is generated through an SB_IO DDR output cell (instantiated in the
-// top module) fed with sclk_d0 = "sending a bit this cycle" and sclk_d1 tied
-// to 0, giving a discrete high-then-low pulse each active cycle instead of
-// one long pulse across a multi-bit burst.
+// This module is device-independent: it emits the four raw signals a DDR
+// output cell needs and leaves the cells themselves to the top level, which
+// is the only file that differs between the Gowin and iCE40 builds.
 //
-// MOSI/DC are driven through SB_IO cells with NEG_TRIGGER=1 (registered on
-// clk_sys's falling edge). Because mosi_bit/dc_bit are plain clk_sys-domain
-// signals, the NEG_TRIGGER cell re-times them to be stable from the middle
-// of the previous cycle onward -- a half clk_sys-cycle of setup margin
-// before the SCLK rising edge that samples them, mirroring how the older
-// 2-cycle/bit engine changed data on SCLK's falling edge a full cycle early.
-// This relationship (and the lack of merged/missing SCLK pulses) was
-// verified in simulation against the real SB_IO behavioral model, not just
-// derived on paper -- getting the DDR phase relationship wrong here would
-// silently corrupt every byte.
+// The contract the top level must honour:
+//
+//   sclk_d0/sclk_d1  drive a DDR output cell.  sclk_d0 = "sending a bit this
+//                    cycle" appears while the clock is high and sclk_d1 (tied
+//                    to 0) while it is low, so every active cycle produces a
+//                    discrete high-then-low pulse instead of one long pulse
+//                    across a multi-bit burst.
+//   mosi_bit/dc_bit  must reach the pad half a clk cycle *before* the SCLK
+//                    rising edge that samples them, and hold half a cycle
+//                    after -- the same margin the older 2-cycle/bit engine
+//                    got by changing data on SCLK's falling edge.
+//   the chip select  must reach the pad with the same latency as sclk_d0, or
+//                    the FSM's "deassert CS two cycles after the last bit"
+//                    will truncate the final byte.
+//
+// Both builds verify this at the pads in simulation against the vendor's own
+// behavioural cell models -- tb_spi_gowin_io.v here against ODDR, and the
+// iCE40 build against SB_IO in cells_sim.v.  Getting the DDR phase wrong
+// silently corrupts every byte, so it is not derived on paper alone.
 // ============================================================================
 module spi_stream_tx (
     input  wire       clk,
@@ -35,10 +43,10 @@ module spi_stream_tx (
     output reg        tx_accept,
     output reg        tx_done,
 
-    output wire        sclk_d0,   // -> SB_IO DDR D_OUT_0 (rising-edge phase)
-    output wire        sclk_d1,   // -> SB_IO DDR D_OUT_1 (tie low at instantiation)
-    output wire        mosi_bit,  // -> SB_IO NEG_TRIGGER OUTPUT_REGISTERED D_OUT_0
-    output wire        dc_bit,    // -> SB_IO NEG_TRIGGER OUTPUT_REGISTERED D_OUT_0
+    output wire        sclk_d0,   // -> DDR cell, clock-high phase
+    output wire        sclk_d1,   // -> DDR cell, clock-low phase (always 0)
+    output wire        mosi_bit,  // -> half-cycle-early registered pad
+    output wire        dc_bit,    // -> half-cycle-early registered pad
     output wire        busy
 );
     reg        active;      // 1 while a bit is being clocked out this cycle
