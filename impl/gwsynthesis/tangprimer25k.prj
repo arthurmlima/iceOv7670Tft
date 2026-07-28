@@ -5,8 +5,7 @@
     <Device id="GW5A-25A" package="MBGA121N" speed="1" partNumber="GW5A-LV25MG121NC1/I0"/>
     <FileList>
         <File path="/Users/arthur/tangprimer25k/tangprimer25k_st7789_top.v" type="verilog"/>
-        <File path="/Users/arthur/tangprimer25k/gowin_pll.v" type="verilog"/>
-        <File path="/Users/arthur/tangprimer25k/async_fifo.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/gowin_pll_40m.v" type="verilog"/>
         <File path="/Users/arthur/tangprimer25k/tangprimer25k_pattern_top.v" type="verilog"/>
         <File path="/Users/arthur/tangprimer25k/status_led.v" type="verilog"/>
         <File path="/Users/arthur/tangprimer25k/test_pattern_src.v" type="verilog"/>

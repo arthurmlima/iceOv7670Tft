@@ -1,39 +1,23 @@
 `timescale 1ns / 1ps
 `default_nettype none
 // ============================================================================
-// cam_capture.v - OV7670 RGB565 receiver, oversampling PCLK on a dedicated
-// 100 MHz capture clock.
+// cam_capture.v - OV7670 RGB565 receiver in the 40.00 MHz system domain.
 //
-// PCLK is treated as data, not as a clock.  At f_int = 24 MHz (CLKRC
-// bypassed) PCLK is 12 MHz, and clk_cap is a separate 100 MHz PLL output, so
-// there are 8.3 capture periods per PCLK period.
+// PCLK is treated as data, not as a clock.  With XCLK=20.000 MHz, CLKRC
+// bypassed and COM14 PCLK=/2, PCLK is 10.000 MHz: four clk_sys periods per
+// PCLK period, two per phase.
 //
-// What that margin actually buys is tolerance to duty-cycle distortion, not
-// headroom in frequency.  The requirement is only that each PCLK phase
-// contains at least one sampling edge, so the *shortest* phase has to be
-// longer than one capture period:
+// Four is the floor for this scheme, and it is a structural floor rather
+// than a tunable one: CLKRC bypass makes PCLK = clk_sys/4 whatever clk_sys
+// is, so raising the system clock does not buy any back.  It still works --
+// pclk_s[1]/pclk_s[2] are the second and third synchronizer stages, so an
+// edge cannot be missed while each phase gets a sample -- but the tolerance
+// to PCLK duty-cycle distortion drops from +/-3 cycles to +/-1.  Going any
+// faster than this means clocking on PCLK instead of sampling it.
 //
-//     clk_cap = 100 MHz  ->  PCLK duty may fall to ~12% before a phase is lost
-//     clk_cap =  40 MHz  ->  it may only fall to ~30%
-//
-// The OV7670 does not specify a PCLK duty cycle, and jumper wiring skews it
-// further.  tb_cam_capture demonstrates the difference directly: with a 25%
-// duty PCLK, sampling at 40 MHz drops 10388 of 67200 pixels per frame while
-// sampling at 100 MHz drops none.  A dropped pixel per line is precisely what
-// makes straight lines lean on the panel.
-//
-// This is also why the sampling rate had to stop being clk_sys.  With CLKRC
-// bypassed PCLK is clk_sys/4 whatever clk_sys is, so sampling in clk_sys was
-// pinned at 4 periods per PCLK -- a 30% duty floor -- and no clock change
-// could improve it.  A dedicated capture clock decouples the two.
-//
-// Clocking directly on PCLK would remove the question entirely, and was
-// implemented and tried: Gowin IDE V1.9.11.03's router segfaults on this
-// design whenever an external pin drives a fabric clock domain, on any pin
-// and under every place/route strategy.  See README section 4.3.
-//
-// Everything here is in the clk_cap domain; the top level carries pixels into
-// clk_sys through async_fifo.
+// The data phase is unchanged by the rate: a rise detected in cycle t is
+// paired with d_s1, the bus sampled at t-1, which is 0-1 clk_sys periods
+// after the rise either way.
 //
 // OV7670 RGB565 byte order:
 //   byte 0 = {R[4:0], G[5:3]}
@@ -43,7 +27,7 @@
 // panel window.  No scaler and no framebuffer are used.
 // ============================================================================
 module cam_capture (
-    input  wire        clk,        // clk_cap, 100 MHz
+    input  wire        clk,
     input  wire        rst,
     input  wire        enable,
 

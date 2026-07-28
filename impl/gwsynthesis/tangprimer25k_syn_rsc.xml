@@ -1,16 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Module name="tangprimer25k_st7789_top" Register="52" Alu="18" Lut="15" T_Register="656(52)" T_Alu="85(18)" T_Lut="871(15)" T_Bsram="49(0)">
+<Module name="tangprimer25k_st7789_top" Register="28" Alu="18" Lut="12" T_Register="460(28)" T_Alu="110(18)" T_Lut="747(12)" T_Bsram="33(0)">
  <SubModule name="g_pll.pll"/>
- <SubModule name="s2_button" Register="23" Alu="18" Lut="13" T_Register="23(23)" T_Alu="18(18)" T_Lut="13(13)"/>
+ <SubModule name="s2_button" Register="23" Alu="18" Lut="14" T_Register="23(23)" T_Alu="18(18)" T_Lut="14(14)"/>
  <SubModule name="camera_config" Register="73" Alu="12" Lut="101" Bsram="1" T_Register="73(73)" T_Alu="12(12)" T_Lut="101(101)" T_Bsram="1(1)"/>
  <SubModule name="g_camera.capture" Register="71" Lut="41" T_Register="71(71)" T_Lut="41(41)"/>
- <SubModule name="g_camera.cdc" Register="168" Alu="3" Lut="97" T_Register="168(168)" T_Alu="3(3)" T_Lut="97(97)"/>
  <SubModule name="frame_gate" Register="3" Lut="2" T_Register="3(3)" T_Lut="2(2)"/>
- <SubModule name="encryption" Register="33" Lut="19" T_Register="66(33)" T_Lut="131(19)">
-  <SubModule name="g_xormap.map" Register="33" Lut="112" T_Register="33(33)" T_Lut="112(112)"/>
+ <SubModule name="encryption" Register="33" Lut="20" T_Register="66(33)" T_Lut="136(20)">
+  <SubModule name="g_xormap.map" Register="33" Lut="116" T_Register="33(33)" T_Lut="116(116)"/>
  </SubModule>
- <SubModule name="fifo" Register="54" Lut="143" Bsram="48" T_Register="54(54)" T_Lut="143(143)" T_Bsram="48(48)"/>
- <SubModule name="display" Register="85" Alu="19" Lut="240" T_Register="100(85)" T_Alu="19(19)" T_Lut="257(240)">
+ <SubModule name="fifo" Register="50" Alu="28" Lut="86" Bsram="32" T_Register="50(50)" T_Alu="28(28)" T_Lut="86(86)" T_Bsram="32(32)"/>
+ <SubModule name="display" Register="85" Alu="19" Lut="267" T_Register="100(85)" T_Alu="19(19)" T_Lut="284(267)">
   <SubModule name="spi" Register="15" Lut="17" T_Register="15(15)" T_Lut="17(17)"/>
  </SubModule>
  <SubModule name="status" Register="46" Alu="15" Lut="71" T_Register="46(46)" T_Alu="15(15)" T_Lut="71(71)"/>

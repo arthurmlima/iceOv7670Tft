@@ -13,10 +13,9 @@ active video, and the surplus has to be held.  This script sizes that surplus
 and checks the two conditions that still have to hold.
 """
 
-SYS_HZ = 40_000_000     # Tang Primer 25K: PLLA CLKOUT0, 50 MHz -> 40 MHz
+SYS_HZ = 40_000_000     # Tang Primer 25K: PLLA 50 MHz -> 40 MHz
 SPI_HZ = 40_000_000     # full-rate DDR SPI engine: SPI_HZ = SYS_HZ
-XCLK_HZ = 24_000_000    # PLLA CLKOUT1, the OV7670's rated maximum
-CAP_HZ = 100_000_000    # PLLA CLKOUT2: oversamples PCLK in cam_capture
+XCLK_HZ = SYS_HZ / 2
 CLKRC_DIV = 1           # CLKRC = 0x00, no prescale
 CAM_INT_HZ = XCLK_HZ / CLKRC_DIV
 PCLK_HZ = CAM_INT_HZ / 2        # COM14 PCLK divider
@@ -31,7 +30,7 @@ CAM_FRAME_INT_CYCLES = CAM_LINE_INT_CYCLES * CAM_TOTAL_LINES
 CROP_PIXELS = 280
 ACTIVE_LINES = 240
 BITS_PER_PIXEL = 16
-FIFO_DEPTH = 40_960             # must match FIFO_DEPTH in the top level
+FIFO_DEPTH = 32_768             # must match FIFO_DEPTH in the top level
 BSRAM_BITS = 56 * 18_432        # GW5A-25A
 
 NPIX = CROP_PIXELS * ACTIVE_LINES
@@ -51,26 +50,22 @@ active_s = ACTIVE_LINES * CAM_LINE_INT_CYCLES / CAM_INT_HZ
 drained_during_active = drain_pix_hz * active_s
 deficit_pixels = max(0.0, NPIX - drained_during_active)
 
-# Capture periods per PCLK period.  cam_capture only needs one sampling edge
-# inside each PCLK phase, so what this really sets is how far the PCLK duty
-# cycle may drift before a phase is missed entirely.
-cap_per_pclk = CAP_HZ / PCLK_HZ
-min_duty = 100.0 / cap_per_pclk
+# clk_sys periods per PCLK period, for cam_capture's 2-FF edge detector.
+clk_per_pclk = SYS_HZ / PCLK_HZ
 
 assert disp_frame_s < cam_frame_s, \
     "Panel cannot finish a frame before the next VSYNC"
 assert deficit_pixels <= FIFO_DEPTH, \
     f"FIFO too small: need {deficit_pixels:.0f}, have {FIFO_DEPTH}"
 assert FIFO_DEPTH * BITS_PER_PIXEL <= BSRAM_BITS, "FIFO does not fit in BSRAM"
-assert cap_per_pclk >= 4, \
-    f"cam_capture wants >=4 capture periods per PCLK, has {cap_per_pclk:.1f}"
+assert clk_per_pclk >= 4, \
+    f"cam_capture needs >=4 clk_sys per PCLK, has {clk_per_pclk:.1f}"
 
 print(f"System clock:          {SYS_HZ/1e6:.6f} MHz")
 print(f"ST7789 SPI clock:      {SPI_HZ/1e6:.6f} MHz")
 print(f"OV7670 XCLK:           {XCLK_HZ/1e6:.6f} MHz")
 print(f"OV7670 internal clock: {CAM_INT_HZ/1e6:.6f} MHz  (CLKRC /{CLKRC_DIV})")
 print(f"OV7670 PCLK:           {PCLK_HZ/1e6:.6f} MHz")
-print(f"Capture clock:         {CAP_HZ/1e6:.6f} MHz")
 print()
 print(f"Frame rate:            {fps:.2f} fps   = f_int / {CAM_FRAME_INT_CYCLES}")
 print(f"Camera frame period:   {cam_frame_s*1e3:.2f} ms")
@@ -85,6 +80,5 @@ print(f"FIFO depth:            {FIFO_DEPTH} pixels "
       f"({100*deficit_pixels/FIFO_DEPTH:.0f}% used, "
       f"{100*FIFO_DEPTH*BITS_PER_PIXEL/BSRAM_BITS:.0f}% of BSRAM)")
 print()
-print(f"Samples per PCLK:      {cap_per_pclk:.2f}")
-print(f"PCLK duty tolerance:   down to {min_duty:.0f}% "
-      f"before a phase is missed")
+print(f"clk_sys per PCLK:      {clk_per_pclk:.1f} "
+      f"(4 is the floor for cam_capture's sampling)")

@@ -11,10 +11,6 @@
 // "flush" is asserted at each accepted camera frame boundary.  Overflow and
 // underflow are sticky until reset so they can be shown on an LED.
 // ============================================================================
-// DEPTH need not be a power of two: the pointers wrap explicitly rather than
-// relying on natural rollover, so the buffer can be sized to the actual
-// surplus instead of the next power of two above it.  On this device that
-// matters -- 65536 pixels would not fit in BSRAM at all.
 module pixel_fifo #(
     parameter integer DEPTH = 256,
     parameter integer AW    = 8
@@ -67,14 +63,12 @@ module pixel_fifo #(
             end else begin
                 if (do_wr) begin
                     mem[wr_ptr] <= wr_data;
-                    wr_ptr      <= (wr_ptr == DEPTH-1) ? {AW{1'b0}}
-                                                       : wr_ptr + 1'b1;
+                    wr_ptr      <= wr_ptr + 1'b1;
                 end
 
                 if (do_rd) begin
                     rd_data  <= mem[rd_ptr];
-                    rd_ptr   <= (rd_ptr == DEPTH-1) ? {AW{1'b0}}
-                                                    : rd_ptr + 1'b1;
+                    rd_ptr   <= rd_ptr + 1'b1;
                     rd_valid <= 1'b1;
                 end
 
