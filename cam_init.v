@@ -20,10 +20,10 @@
 // Register table = the proven camera.h set, with exactly these deltas:
 //
 //   COM7  0x04 -> 0x14   select QVGA as well as RGB
-//   CLKRC 0x00 -> 0x01   internal clock = XCLK/2 = 10.000 MHz
+//   CLKRC 0x00 -> 0x00   internal clock = XCLK = 20.000 MHz (no prescale)
 //   DBLV  0x4A -> 0x0A   PLL x4 OFF (x4 would quadruple everything)
 //   COM3  0x00 -> 0x04   enable DCW              \
-//   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA, PCLK 5.000 MHz
+//   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA, PCLK 10.000 MHz
 //   + 0x70..0x73, 0xA2   canonical scaling regs  /
 //   RGB444 0x03 -> 0x00  RGB444 OFF  \  the old table left the sensor in
 //   COM15  0xF0 -> 0xD0  true RGB565 /  444/555 mode; the panel needs 565
@@ -56,7 +56,7 @@ module cam_init #(
                 6'd0 :  rom = 16'h1280;  // COM7   soft reset
                 6'd1 :  rom = 16'h1280;  // COM7   soft reset (twice, as proven)
                 6'd2 :  rom = 16'h1214;  // COM7   QVGA + RGB output
-                6'd3 :  rom = 16'h1101;  // CLKRC  /2  (was 0x00)          [changed]
+                6'd3 :  rom = 16'h1100;  // CLKRC  no prescale: f_int = XCLK
                 6'd4 :  rom = 16'h0C04;  // COM3   DCW enable (was 0x00)   [changed]
                 6'd5 :  rom = 16'h3E19;  // COM14  manual scale, PCLK/2    [changed]
                 6'd6 :  rom = 16'h8C00;  // RGB444 disable (was 0x03)      [changed]
@@ -72,7 +72,7 @@ module cam_init #(
                 6'd16:  rom = 16'h54E4;  // MTX6  /
                 6'd17:  rom = 16'h589E;  // MTXS
                 6'd18:  rom = 16'h3DC0;  // COM13  gamma en, UV auto
-                6'd19:  rom = 16'h1101;  // CLKRC  /2 again
+                6'd19:  rom = 16'h1100;  // CLKRC  no prescale again
                 6'd20:  rom = 16'h1711;  // HSTART
                 6'd21:  rom = 16'h1861;  // HSTOP
                 6'd22:  rom = 16'h32A4;  // HREF

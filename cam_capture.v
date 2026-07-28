@@ -3,12 +3,21 @@
 // ============================================================================
 // cam_capture.v - OV7670 RGB565 receiver in the 40.00 MHz system domain.
 //
-// PCLK is treated as data, not as a clock.  With XCLK=20.000 MHz, CLKRC=/2,
-// and COM14 PCLK=/2, PCLK is 5.000 MHz.  That leaves 8 system-clock periods
-// per PCLK period, so 2-FF synchronization and edge detection still provide
-// a comfortable sampling window without an asynchronous clock domain.  The
-// ratio is fixed by the clock tree (PCLK = clk_sys/8), so it is the same 8
-// cycles the 39.00 MHz iCEBreaker build had.
+// PCLK is treated as data, not as a clock.  With XCLK=20.000 MHz, CLKRC
+// bypassed and COM14 PCLK=/2, PCLK is 10.000 MHz: four clk_sys periods per
+// PCLK period, two per phase.
+//
+// Four is the floor for this scheme, and it is a structural floor rather
+// than a tunable one: CLKRC bypass makes PCLK = clk_sys/4 whatever clk_sys
+// is, so raising the system clock does not buy any back.  It still works --
+// pclk_s[1]/pclk_s[2] are the second and third synchronizer stages, so an
+// edge cannot be missed while each phase gets a sample -- but the tolerance
+// to PCLK duty-cycle distortion drops from +/-3 cycles to +/-1.  Going any
+// faster than this means clocking on PCLK instead of sampling it.
+//
+// The data phase is unchanged by the rate: a rise detected in cycle t is
+// paired with d_s1, the bus sampled at t-1, which is 0-1 clk_sys periods
+// after the rise either way.
 //
 // OV7670 RGB565 byte order:
 //   byte 0 = {R[4:0], G[5:3]}

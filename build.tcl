@@ -5,9 +5,12 @@
 #
 # Output: impl/pnr/tangprimer25k.fs
 # ============================================================================
+# TOP is set by build_pattern.tcl; default to the camera build.
+if {![info exists TOP]} { set TOP tangprimer25k_st7789_top }
+
 open_project tangprimer25k.gprj
 
-set_option -top_module tangprimer25k_st7789_top
+set_option -top_module $TOP
 
 # Release pins that default to a dedicated configuration function.  Each of
 # these is required by a pin this design actually uses; nothing else is freed

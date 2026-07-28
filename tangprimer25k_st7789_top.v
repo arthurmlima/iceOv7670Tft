@@ -14,13 +14,25 @@
 // ---------------------------------------------------------------------------
 // The dock oscillator is 50.000 MHz (the iCEBreaker's was 12 MHz), so the PLL
 // settings had to be recomputed.  clk_sys is 40.000 MHz, deliberately close to
-// the iCE40 build's 39.000 MHz: every rate in this design is derived from
-// clk_sys by a fixed ratio (SPI = clk_sys, XCLK = clk_sys/2, camera internal
-// clock = XCLK/2), so the camera-line / display-line margin proven at 39 MHz
-// is *identical* at any clk_sys -- see timing_check.py.  Staying near the
-// original keeps the two absolute limits unchanged as well: ST7789 SCLK at
-// 40 MHz and OV7670 XCLK at 20 MHz, both already exercised on hardware.
-// Frame rate scales with clk_sys, so 40/39 of the iCE40 build: ~12.50 fps.
+// the iCE40 build's 39.000 MHz, which keeps the two absolute limits at values
+// that were already exercised on hardware: ST7789 SCLK at 40 MHz and OV7670
+// XCLK at 20 MHz.
+//
+// Frame rate is set by one thing only -- the camera's internal clock:
+//
+//     fps = f_int / 799680          (510 lines x 1568 internal clocks)
+//
+// The iCE40 design ran f_int at clk_sys/4 (XCLK = clk_sys/2, CLKRC = /2),
+// which made the camera's active-video pixel rate f_int/4 exactly equal to the
+// panel's drain rate SPI/16.  With the two rates identical the FIFO never
+// accumulates, which is why 256 entries sufficed -- but it also pinned the
+// frame rate at 12.5 fps while the panel could have sustained 37.2.
+//
+// CLKRC is now bypassed, so f_int = XCLK = clk_sys/2 = 20 MHz and the frame
+// rate doubles to 25.0 fps.  The camera then outruns the panel during active
+// video, and the surplus -- the integral of the rate difference over the
+// active region, up to 20160 pixels -- has to be buffered.  Hence FIFO_DEPTH
+// below.  See timing_check.py for the arithmetic.
 //
 // ---------------------------------------------------------------------------
 // SPI output cells: SB_IO -> ODDR
@@ -68,7 +80,11 @@ module tangprimer25k_st7789_top #(
     parameter integer LED_ACTIVE_HIGH    = 1,
     parameter integer ENABLE_XORMAP      = 1,
     parameter integer ENCRYPTION_DEFAULT = 0,
-    parameter [31:0]  XORMAP_INITIAL_SEED = 32'h1ACE_B00C
+    parameter [31:0]  XORMAP_INITIAL_SEED = 32'h1ACE_B00C,
+    // 1 = replace the camera with the built-in moving test pattern, keeping
+    // the camera's exact pixel/line/frame timing.  Used to bisect the
+    // pipeline; see tangprimer25k_pattern_top.v and `make pattern`.
+    parameter integer PATTERN_SOURCE     = 0
 )(
     // Dock board: 50 MHz oscillator, two active-high buttons, two status LEDs
     input  wire       clk50,
@@ -100,6 +116,19 @@ module tangprimer25k_st7789_top #(
     output wire       cam_pwdn,
     input  wire [7:0] cam_d
 );
+    // ---------------- clock ratios ----------------
+    // cam_xclk = clk_sys/2 and CLKRC is bypassed, so the camera's internal
+    // clock is clk_sys/2 and PCLK (COM14 = /2) is clk_sys/4.  Several things
+    // below are derived from this one number.
+    localparam integer CAM_INT_DIV = 2;
+
+    // Worst case the sensor emits its 240 output lines back to back, giving
+    // the panel 240*1568/f_int = 18.8 ms to drain 67200 pixels at SPI/16.
+    // It manages 47040, so 20160 have to wait.  32768 rounds that up to a
+    // power of two with 60% headroom and costs 512 Kb of the 1008 Kb of BSRAM.
+    localparam integer FIFO_DEPTH = 32768;
+    localparam integer FIFO_AW    = $clog2(FIFO_DEPTH);
+
     // ---------------- system clock ----------------
     wire clk_sys;
     wire pll_lock;
@@ -229,27 +258,47 @@ module tangprimer25k_st7789_top #(
     wire lcd_init_done;
     wire lcd_frame_done;
     wire lcd_sync_error;
+    wire lcd_starve_error;
     wire lcd_stream_active;
     wire bl_raw;
     wire stream_enable = cam_cfg_done && lcd_init_done;
 
-    // ---------------- camera capture ----------------
+    // ---------------- pixel source ----------------
     wire [15:0] cap_pixel;
     wire        cap_wr;
     wire        cap_frame_sync;
 
-    cam_capture capture (
-        .clk        (clk_sys),
-        .rst        (rst),
-        .enable     (stream_enable),
-        .pclk_i     (cam_pclk),
-        .vsync_i    (cam_vsync),
-        .href_i     (cam_href),
-        .d_i        (cam_d),
-        .pix_data   (cap_pixel),
-        .pix_wr     (cap_wr),
-        .frame_sync (cap_frame_sync)
-    );
+    generate
+        if (PATTERN_SOURCE != 0) begin : g_pattern
+            test_pattern_src #(
+                .WIDTH       (280),
+                .HEIGHT      (240),
+                .PIX_CYCLES  (4*CAM_INT_DIV),      // 4 internal clocks/pixel
+                .LINE_CYCLES (1568*CAM_INT_DIV),
+                .TOTAL_LINES (510)
+            ) source (
+                .clk        (clk_sys),
+                .rst        (rst),
+                .enable     (stream_enable),
+                .pix_data   (cap_pixel),
+                .pix_wr     (cap_wr),
+                .frame_sync (cap_frame_sync)
+            );
+        end else begin : g_camera
+            cam_capture capture (
+                .clk        (clk_sys),
+                .rst        (rst),
+                .enable     (stream_enable),
+                .pclk_i     (cam_pclk),
+                .vsync_i    (cam_vsync),
+                .href_i     (cam_href),
+                .d_i        (cam_d),
+                .pix_data   (cap_pixel),
+                .pix_wr     (cap_wr),
+                .frame_sync (cap_frame_sync)
+            );
+        end
+    endgenerate
 
     // ---------------- atomic camera/display frame acceptance ----------------
     // A new camera frame is accepted only while the display is waiting for it.
@@ -292,7 +341,7 @@ module tangprimer25k_st7789_top #(
         .encrypt_active (encryption_active)
     );
 
-    // ---------------- one-BSRAM rate-matching FIFO ----------------
+    // ---------------- rate-matching / surplus FIFO ----------------
     wire        fifo_full;
     wire        fifo_empty;
     wire [15:0] fifo_rd_data;
@@ -300,9 +349,12 @@ module tangprimer25k_st7789_top #(
     wire        fifo_rd_en;
     wire        fifo_overflow;
     wire        fifo_underflow;
-    wire [8:0]  fifo_level;
+    wire [FIFO_AW:0] fifo_level;
 
-    pixel_fifo fifo (
+    pixel_fifo #(
+        .DEPTH (FIFO_DEPTH),
+        .AW    (FIFO_AW)
+    ) fifo (
         .clk       (clk_sys),
         .rst       (rst),
         .flush     (accepted_frame_sync),
@@ -349,6 +401,7 @@ module tangprimer25k_st7789_top #(
         .init_done     (lcd_init_done),
         .frame_done    (lcd_frame_done),
         .sync_error    (lcd_sync_error),
+        .starve_error  (lcd_starve_error),
         .stream_active (lcd_stream_active)
     );
 
@@ -417,14 +470,36 @@ module tangprimer25k_st7789_top #(
     assign tft_res = tft_resn;
     assign tft_blk = BL_ACTIVE_HIGH ? bl_raw : ~bl_raw;
 
-    // READY LED: both devices initialized.  DONE LED: sticky stream/FIFO fault.
-    wire stream_fault = fifo_overflow || fifo_underflow || lcd_sync_error ||
-                        dropped_frame_error;
-    assign led_ready = LED_ACTIVE_HIGH ? stream_enable : ~stream_enable;
-    assign led_done  = LED_ACTIVE_HIGH ? stream_fault  : ~stream_fault;
+    // ---------------- status LEDs ----------------
+    // Two LEDs cannot localise a fault by being on or off, so they carry
+    // patterns instead: READY (E8) toggles once per completed frame, so a
+    // frozen picture is immediately distinguishable from a stalled pipeline,
+    // and DONE (D7) blinks the index of the first sticky fault -- off means no
+    // fault has latched at all.  See status_led.v.
+    wire [4:0] faults = {dropped_frame_error,   // 5 blinks
+                         lcd_sync_error,        // 4
+                         lcd_starve_error,      // 3
+                         fifo_underflow,        // 2
+                         fifo_overflow};        // 1
+
+    wire led_ready_raw;
+    wire led_fault_raw;
+
+    status_led #(.CLK_HZ(SYS_CLK_HZ)) status (
+        .clk        (clk_sys),
+        .rst        (rst),
+        .ready      (stream_enable),
+        .frame_done (lcd_frame_done),
+        .faults     (faults),
+        .led_ready  (led_ready_raw),
+        .led_fault  (led_fault_raw)
+    );
+
+    assign led_ready = LED_ACTIVE_HIGH ? led_ready_raw : ~led_ready_raw;
+    assign led_done  = LED_ACTIVE_HIGH ? led_fault_raw : ~led_fault_raw;
 
     // Explicitly consume status nets that are useful for probing but not pins.
-    wire _unused_ok = &{1'b0, fifo_full, fifo_level[8], lcd_frame_done,
+    wire _unused_ok = &{1'b0, fifo_full, fifo_level[FIFO_AW],
                         lcd_stream_active, encryption_active, cam_siod_in,
                         s2_level};
 endmodule

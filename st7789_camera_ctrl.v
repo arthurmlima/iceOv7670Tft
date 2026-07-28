@@ -19,7 +19,11 @@ module st7789_camera_ctrl #(
     parameter integer HEIGHT       = 240,
     parameter integer X_SHIFT      = 20,
     parameter integer Y_SHIFT      = 0,
-    parameter [7:0]   MADCTL_VAL   = 8'hA0
+    parameter [7:0]   MADCTL_VAL   = 8'hA0,
+    // Abort a frame whose pixels stop arriving for this long.  Must be well
+    // above the camera's longest legitimate gap (its vertical blanking, a few
+    // ms) and well below one frame period.
+    parameter integer STARVE_MS    = 20
 )(
     input  wire        clk,
     input  wire        resetn,
@@ -43,6 +47,7 @@ module st7789_camera_ctrl #(
     output reg         init_done,
     output reg         frame_done,
     output reg         sync_error,
+    output reg         starve_error,
     output wire        stream_active
 );
     // SPI runs at one bit per clk_sys cycle via the DDR engine in
@@ -157,6 +162,23 @@ module st7789_camera_ctrl #(
 
     assign stream_active = (state >= S_WIN_LOAD) && (state <= S_PIX_LAST);
 
+    // ---------------- starved-frame watchdog ----------------
+    // Without this, a frame whose pixels stop arriving part-way through wedges
+    // the entire pipeline permanently, not just that frame: the FSM waits in
+    // S_PIX_NEED forever, so stream_active never drops, so frame_stream_gate
+    // sees frame_ready_i low at every subsequent VSYNC and suppresses every
+    // following frame.  The picture freezes on whatever reached GRAM and only
+    // a manual reset recovers it.  Aborting the starved frame instead costs
+    // one visibly torn frame and the stream resumes by itself.
+    localparam integer STARVE_W = (STARVE_MS <= 2) ? 2 : $clog2(STARVE_MS+1);
+
+    // Only the pixel-streaming states can starve; the CASET/RASET/RAMWR window
+    // phase is a fixed 11 bytes and never waits on the FIFO.
+    wire pixel_phase = (state >= S_PIX_NEED) && (state <= S_PIX_LAST);
+
+    reg [STARVE_W-1:0] starve_ms;
+    wire starve_timeout = pixel_phase && (starve_ms >= STARVE_MS);
+
     // Keep CS low for each init byte and for the complete window+pixel burst.
     assign tft_cs_n = ~((state == S_INI_SEND) || (state == S_INI_WAIT) ||
                         stream_active);
@@ -178,12 +200,20 @@ module st7789_camera_ctrl #(
             init_done   <= 1'b0;
             frame_done  <= 1'b0;
             sync_error  <= 1'b0;
+            starve_ms    <= {STARVE_W{1'b0}};
+            starve_error <= 1'b0;
         end else begin
             fifo_rd_en <= 1'b0;
             frame_done <= 1'b0;
 
             if (ms_tick && dly_ms != 8'd0)
                 dly_ms <= dly_ms - 1'b1;
+
+            // Any pixel arriving, or simply not streaming, rearms the watchdog.
+            if (!pixel_phase || fifo_rd_valid)
+                starve_ms <= {STARVE_W{1'b0}};
+            else if (ms_tick && !starve_timeout)
+                starve_ms <= starve_ms + 1'b1;
 
             // A new camera frame while the previous panel transfer is still
             // active means the timing margin has been lost.
@@ -327,6 +357,16 @@ module st7789_camera_ctrl #(
 
             default: state <= S_RST_H0;
             endcase
+
+            // Overrides the case above: give up on this frame and go back to
+            // waiting for the next VSYNC.  The panel keeps the partial image
+            // until the next accepted frame overwrites it from the top.
+            if (starve_timeout) begin
+                starve_error <= 1'b1;
+                tx_valid     <= 1'b0;
+                fifo_rd_en   <= 1'b0;
+                state        <= S_WAIT_FR;
+            end
         end
     end
 endmodule
