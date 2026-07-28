@@ -8,7 +8,8 @@ GOWIN_IDE := /Applications/GowinIDE.app/Contents/Resources/Gowin_EDA/IDE
 PRIM_SIM  := $(GOWIN_IDE)/simlib/gw5a/prim_sim.v
 
 SOURCES  := tangprimer25k_st7789_top.v tangprimer25k_pattern_top.v \
-            gowin_pll_40m.v btn_debounce.v status_led.v test_pattern_src.v \
+            gowin_pll.v async_fifo.v btn_debounce.v status_led.v \
+            test_pattern_src.v \
             cam_init.v cam_capture.v frame_stream_gate.v \
             pixel_xor_stage.v xormap_32.v pixel_fifo.v \
             st7789_camera_ctrl.v st7789_init_rom.v spi_stream_tx.v
@@ -57,7 +58,7 @@ RECOVERY_SOURCES := tb_frame_recovery.v st7789_camera_ctrl.v \
                     st7789_init_rom.v spi_stream_tx.v frame_stream_gate.v \
                     pixel_fifo.v
 
-sim: sim-spi sim-recovery
+sim: sim-spi sim-recovery sim-camera
 
 sim-spi: $(SIM_SOURCES)
 	iverilog -g2012 -o /tmp/$(PROJECT)_spi_tb.vvp \
@@ -71,10 +72,19 @@ sim-recovery: $(RECOVERY_SOURCES)
 		-s tb_frame_recovery $(RECOVERY_SOURCES) "$(PRIM_SIM)"
 	vvp /tmp/$(PROJECT)_recovery_tb.vvp
 
+CAMERA_SOURCES := tb_cam_capture.v cam_capture.v async_fifo.v
+
+# Drives a synthetic OV7670 at real QVGA timing through cam_capture and the
+# clock-domain crossing, and checks every pixel by coordinate.
+sim-camera: $(CAMERA_SOURCES)
+	iverilog -g2012 -o /tmp/$(PROJECT)_camera_tb.vvp \
+		-s tb_cam_capture $(CAMERA_SOURCES) "$(PRIM_SIM)"
+	vvp /tmp/$(PROJECT)_camera_tb.vvp
+
 timing:
 	python3 timing_check.py
 
 clean:
 	rm -rf impl
 
-.PHONY: all pattern prog prog-pattern flash sim sim-spi sim-recovery timing clean
+.PHONY: all pattern prog prog-pattern flash sim sim-spi sim-recovery sim-camera timing clean

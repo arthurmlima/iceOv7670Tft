@@ -6,7 +6,8 @@
     <Device name="GW5A-25A" pn="GW5A-LV25MG121NC1/I0">gw5a25a-002</Device>
     <FileList>
         <File path="tangprimer25k_st7789_top.v" type="file.verilog" enable="1"/>
-        <File path="gowin_pll_40m.v" type="file.verilog" enable="1"/>
+        <File path="gowin_pll.v" type="file.verilog" enable="1"/>
+        <File path="async_fifo.v" type="file.verilog" enable="1"/>
         <File path="tangprimer25k_pattern_top.v" type="file.verilog" enable="1"/>
         <File path="status_led.v" type="file.verilog" enable="1"/>
         <File path="test_pattern_src.v" type="file.verilog" enable="1"/>

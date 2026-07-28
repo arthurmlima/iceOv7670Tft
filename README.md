@@ -10,7 +10,7 @@ timing and the panel's constant SPI drain rate.
 ```text
 OV7670 RGB565 → center-crop 320×240 to 280×240
               → optional frame-seeded XOR-map stage
-              → 32768×16 synchronous FIFO (32 GW5A BSRAM)
+              → 40960×16 synchronous FIFO (48 GW5A BSRAM)
               → ST7789 RAMWR stream
 ```
 
@@ -28,17 +28,18 @@ change and why; everything between the top level and the pads is the same RTL.
 | Path | Role |
 |---|---|
 | `tangprimer25k_st7789_top.v` | Top level: PLL, POR/reset, camera XCLK, ODDR SPI pad cells, SCCB IO buffer, buttons, status LEDs |
-| `gowin_pll_40m.v` | `PLLA` wrapper: 50 MHz dock oscillator → 40 MHz `clk_sys` |
+| `gowin_pll.v` | `PLLA` wrapper: 50 MHz dock oscillator → 40 MHz `clk_sys`, 24 MHz camera XCLK, 100 MHz capture clock |
+| `async_fifo.v` | Gray-pointer dual-clock FIFO carrying pixels from the capture domain into `clk_sys` |
 | `btn_debounce.v` | Synchronizer + integrate-and-commit debouncer for one pushbutton |
 | `status_led.v` | Turns the two board LEDs into a frame heartbeat and a blink-coded fault index |
 | `test_pattern_src.v` | Frame-static diagnostic pattern with the camera's exact timing |
 | `tangprimer25k_pattern_top.v` | Diagnostic top: same design, `test_pattern_src` instead of the camera |
 | `cam_init.v` | OV7670 SCCB (I²C-like) master — writes the register table on power-up |
-| `cam_capture.v` | Synchronizes PCLK/HREF/VSYNC, assembles RGB565 bytes, crops 320→280 columns |
+| `cam_capture.v` | Oversamples PCLK/HREF/VSYNC on the 100 MHz capture clock, assembles RGB565 bytes, crops 320→280 columns |
 | `frame_stream_gate.v` | Atomically accepts a frame only when the display is ready; drops busy-time frames without flushing/mixing FIFO data |
 | `pixel_xor_stage.v` | Per-frame seed generator, frame-safe bypass mux, and pixel/XOR-map integration |
 | `xormap_32.v` | Iterative 32-bit XOR map with a 16-bit folded output |
-| `pixel_fifo.v` | 32768×16 single-clock FIFO absorbing the camera/panel rate difference (infers 32 BSRAM) |
+| `pixel_fifo.v` | 40960×16 single-clock FIFO absorbing the camera/panel rate difference (infers 48 BSRAM) |
 | `st7789_camera_ctrl.v` | ST7789 reset/init/address-window FSM, streams FIFO pixels into RAMWR |
 | `st7789_init_rom.v` | Combinational ROM: the known-working ST7789 register-init sequence |
 | `spi_stream_tx.v` | Gapless mode-0 SPI byte engine, one bit per `clk_sys` cycle; device-independent (the DDR pad cells live in the top level) |
@@ -49,6 +50,7 @@ change and why; everything between the top level and the pads is the same RTL.
 | `Makefile` | `gw_sh` → `openFPGALoader` build/program flow, plus `sim` and `timing` |
 | `tb_spi_gowin_io.v` | Pad-level testbench for the ODDR SPI cells (see [§4.2](#42-spi-pad-cells-sb_io--oddr)) |
 | `tb_frame_recovery.v` | Reproduces the starved-frame deadlock and proves the watchdog clears it |
+| `tb_cam_capture.v` | Drives a synthetic OV7670 through the capture path and the clock crossing, checking every pixel by coordinate |
 | `build_pattern.tcl` | `build.tcl` with the diagnostic top selected |
 | `timing_check.py` | Recomputes the clock/line-rate/FIFO-margin numbers in [§4](#4-clock-plan) and [§5](#5-line-rate-proof) |
 | `docs/SETUP.md` | One-time Gowin CLI toolchain setup on macOS, and board notes |
@@ -77,7 +79,7 @@ built from, plus the retired iCE40 build. None of it is in the Makefile's
 ```text
 tangprimer25k_st7789_top                     (PLL, POR/reset, XCLK gen, LEDs, pad cells)
 │
-├─ gowin_pll_40m  "pll"                       50 MHz → 40 MHz clk_sys
+├─ gowin_pll  "pll"                           50 MHz → 40 / 24 / 100 MHz
 │    └─ PLLA                                  [GW5A primitive]
 │
 ├─ btn_debounce  "s2_button"                  S2 → one clean toggle pulse per press
@@ -97,7 +99,9 @@ tangprimer25k_st7789_top                     (PLL, POR/reset, XCLK gen, LEDs, pa
 ├─ pixel_xor_stage  "encryption"              optional frame-seeded pixel XOR
 │    └─ xormap_32  "map"                      iterative 32-bit XOR map
 │
-├─ pixel_fifo  "fifo"                         32768×16 surplus FIFO (32 BSRAM)
+├─ async_fifo  "cdc"                          clk_cap → clk_sys pixel crossing
+│
+├─ pixel_fifo  "fifo"                         40960×16 surplus FIFO (48 BSRAM)
 │
 ├─ st7789_camera_ctrl  "display"              ST7789 reset/init/window/pixel-stream FSM
 │    ├─ st7789_init_rom  "init_rom"           combinational panel-init byte ROM
@@ -123,7 +127,8 @@ flowchart LR
     subgraph CLK["Clock generation"]
         OSC["50 MHz\ndock oscillator (E2)"] --> PLL["PLLA\nIDIV=1 FBDIV=1\nMDIV=24 ODIV0=30"]
         PLL --> SYS["clk_sys\n40.00 MHz"]
-        SYS -- "÷2 toggle" --> XCLKW["cam_xclk\n20.000 MHz\n= f_int, CLKRC bypassed"]
+        PLL --> XCLKW["cam_xclk\n24.000 MHz\n= f_int, CLKRC bypassed"]
+        PLL --> CAP["clk_cap\n100.00 MHz"]
     end
 
     subgraph RST["Reset"]
@@ -146,7 +151,7 @@ flowchart LR
     CAP -- "pix_data[15:0]" --> ENC["pixel_xor_stage\nframe seed + XOR/bypass"]
     GATE -- "accepted pixel valid" --> ENC
     CAP -- frame_sync --> ENC
-    GATE -- "accepted frame_sync" --> FIFO["pixel_fifo\n32768×16 (32 BSRAM)"]
+    GATE -- "accepted frame_sync" --> FIFO["pixel_fifo\n40960×16 (48 BSRAM)"]
     ENC -- "pixel[15:0], valid" --> FIFO
     GATE -- "accepted frame_sync" --> CTRL
 
@@ -177,16 +182,18 @@ clock. Both buttons pass through synchronizers before entering any logic.
 | Clock | Value | Source |
 |---|---:|---|
 | Dock oscillator | 50.000 MHz | Tang Primer 25K Dock, pin E2 |
-| FPGA system clock (`clk_sys`) | 40.000 MHz | `PLLA` |
+| FPGA system clock (`clk_sys`) | 40.000 MHz | `PLLA` CLKOUT0 |
 | ST7789 SCLK | 40.000 MHz | `clk_sys`, via DDR SPI engine |
-| OV7670 XCLK | 20.000 MHz | `clk_sys` / 2 |
-| OV7670 internal clock | 20.000 MHz | XCLK, `CLKRC = 0x00` (no prescale) |
-| OV7670 PCLK | 10.000 MHz | QVGA scaling, PCLK / 2 |
+| OV7670 XCLK | 24.000 MHz | `PLLA` CLKOUT1 |
+| OV7670 internal clock | 24.000 MHz | XCLK, `CLKRC = 0x00` (no prescale) |
+| OV7670 PCLK | 12.000 MHz | QVGA scaling, PCLK / 2 |
+| Camera capture clock (`clk_cap`) | 100.000 MHz | `PLLA` CLKOUT2 |
 
-PLL settings: `IDIV_SEL=1`, `FBDIV_SEL=1`, `MDIV_SEL=24`, `ODIV0_SEL=30`
-(`f_vco = 50 MHz × 24 = 1200 MHz`, `f_out = 1200 / 30 = 40 MHz`).
+PLL settings: `IDIV_SEL=1`, `FBDIV_SEL=1`, `MDIV_SEL=24` (`f_vco = 50 MHz ×
+24 = 1200 MHz`), then `ODIV0=30 → 40 MHz`, `ODIV1=50 → 24 MHz`,
+`ODIV2=12 → 100 MHz`.
 
-### 4.1 Why 40.00 MHz, and why 25 fps
+### 4.1 Why 40.00 MHz, and why 30 fps
 
 Frame rate depends on exactly one thing:
 
@@ -196,17 +203,20 @@ fps = f_int / 799,680          (510 lines × 1568 internal clocks)
 
 The OV7670's frame period is a fixed number of internal clocks. QVGA decimates
 the *output*; it does not shorten the array scan. So nothing about the panel,
-the SPI rate or the crop changes the frame rate — only `f_int` does.
+the SPI rate or the crop changes the frame rate — only `f_int` does. At the
+sensor's rated maximum of 24 MHz that is **30.0 fps**, and the panel at 40 MHz
+SCLK can sustain 37.2, so the camera is no longer the limit and the panel is
+not yet one.
 
-`clk_sys` is therefore chosen by the two absolute limits rather than by frame
-rate: ST7789 SCLK at 40 MHz (the iCE40 build's proven 39 MHz, rounded to a
-clean PLL ratio) and OV7670 XCLK at 20 MHz (inside the sensor's 10–48 MHz
-range). Running `clk_sys` straight off the 50 MHz oscillator would push SCLK
-to 50 MHz, which is headroom the panel has not been tested at here.
+`clk_sys` stays at 40 MHz precisely so that remains true: it is the iCE40
+build's proven 39 MHz rounded to a clean PLL ratio, and pushing it would raise
+SCLK past what this panel has been shown to tolerate. XCLK gets its own PLL
+output instead of a division of `clk_sys`, because dividing would only offer
+20 MHz (25 fps) or 13.3 MHz (16.7 fps).
 
-**What changed from the iCEBreaker design.** It ran `f_int` at `clk_sys/4`
-(XCLK = `clk_sys/2`, then `CLKRC = /2`), which made the camera's active-video
-pixel rate exactly equal to the panel's drain rate:
+**Where the 12.5 fps came from.** The iCEBreaker design ran `f_int` at
+`clk_sys/4` (XCLK = `clk_sys/2`, then `CLKRC = /2`), which made the camera's
+active-video pixel rate exactly equal to the panel's drain rate:
 
 ```text
 camera pixel rate = f_int/4 = clk_sys/16
@@ -214,24 +224,34 @@ panel  pixel rate = SPI/16  = clk_sys/16     ← identical, by construction
 ```
 
 With the rates identical the FIFO never accumulates — one pixel in, one out —
-which is why 256 entries sufficed. But that same balance pinned the frame rate
-at 12.5 fps while the panel could sustain 37.2.
+which is why 256 entries sufficed. That balance is also exactly what pinned
+the frame rate at a quarter of what the panel could take.
 
-`CLKRC` is now bypassed (`0x00` instead of `0x01`), so `f_int = XCLK =
-clk_sys/2 = 20 MHz` and the frame rate doubles to **25.0 fps**. The camera now
-outruns the panel during active video, and the surplus has to be held — see
-[§5](#5-frame-rate-and-buffering). That surplus is the *only* reason the FIFO
-grew; nothing else in the datapath changed.
+Getting to 30 fps therefore took two things, and only two:
 
-The remaining step to 30 fps (the OV7670's rated QVGA maximum) is not a
-register change. `PCLK` is `clk_sys/4` once `CLKRC` is bypassed — structurally,
-whatever `clk_sys` is — and that is the floor for `cam_capture`'s 2-flop
-sampling of PCLK as data. Going faster means clocking *on* PCLK instead of
-sampling it, i.e. a genuine second clock domain.
+1. **Bypass `CLKRC`** (`0x00` instead of `0x01`) and give XCLK its own 24 MHz
+   clock. This is the entire frame-rate change. The camera then outruns the
+   panel during active video and the surplus has to be held — see
+   [§5](#5-frame-rate-and-buffering).
+2. **Move the camera sampling off `clk_sys`.** PCLK doubles with `f_int`, and
+   `cam_capture` samples it as data. With `CLKRC` bypassed PCLK is `clk_sys/4`
+   *structurally* — whatever `clk_sys` is — so sampling in `clk_sys` was pinned
+   at 4 samples per PCLK period and no clock change could improve it. It now
+   runs on a dedicated 100 MHz PLL output (8.3 samples) and `async_fifo`
+   carries pixels into `clk_sys`.
 
-`USE_PLL=0` bypasses the PLL and clocks the design from the raw 50 MHz
-oscillator; if you do that, override `SYS_CLK_HZ` and `SPI_HZ` to `50000000`
-so the millisecond and SCCB dividers stay correct.
+The second point is about tolerance, not frequency headroom. `cam_capture`
+only needs one sampling edge inside each PCLK phase, so what the ratio really
+sets is how far the PCLK duty cycle may drift before a phase is missed
+entirely: **~30% at 40 MHz, ~12% at 100 MHz**. The OV7670 does not specify a
+PCLK duty cycle and jumper wiring skews it further. `make sim-camera`
+demonstrates the difference — with a 25% duty PCLK, sampling at 40 MHz drops
+10,388 of 67,200 pixels per frame and sampling at 100 MHz drops none. A
+dropped pixel per line is exactly what makes straight lines lean on the panel.
+
+`USE_PLL=0` is a degraded fallback that clocks everything from the raw 50 MHz
+oscillator; it has no 24 MHz or 100 MHz source, so `SYS_CLK_HZ`, `SPI_HZ` and
+`CAM_XCLK_HZ` all need overriding to match and 30 fps is not available.
 
 ### 4.2 SPI pad cells: `SB_IO` → `ODDR`
 
@@ -272,34 +292,74 @@ test is not vacuous.
 
 ---
 
+### 4.3 Why `cam_capture` does not simply clock on PCLK
+
+Clocking on PCLK is the textbook answer for a source-synchronous parallel bus:
+sample the data with the strobe that accompanies it and setup/hold becomes a
+property of the sensor's own timing rather than of how fast an unrelated
+sampling clock happens to be. It removes the duty-cycle question entirely
+instead of buying margin against it.
+
+It was implemented that way first — `cam_capture` clocked on `cam_pclk`, with
+`async_fifo` crossing into `clk_sys` exactly as it does now. **Gowin IDE
+V1.9.11.03's router segfaults (exit 139) on this design whenever an external
+pin drives a fabric clock domain.** It was reproduced against:
+
+- both a general-purpose pin (B11) and a clock-capable one (C11, `GCLKT_13`);
+- `route_option` 1 and 2, and `place_option` 2;
+- with and without the 24 MHz clock net, with and without an asynchronous
+  reset on the PCLK flops, and at two different FIFO depths.
+
+Synthesis always completes; placement always completes; routing always dies at
+the same point. Moving that one clock back inside the chip — the identical RTL
+otherwise — routes cleanly every time. GW5A has no `BUFG`-style primitive to
+instantiate explicitly, so there is no obvious handle to force different clock
+routing.
+
+The oversampling version is what ships. It gets the same 30 fps with the same
+panel clock, and the duty-cycle tolerance it gives up is measured rather than
+assumed (§4.1). If a later Gowin release fixes the router, the PCLK-clocked
+receiver is a small, well-understood change back.
+
+---
+
 ## 5. Frame rate and buffering
 
 ```text
-frame rate        = 20.000 MHz / 799,680        = 25.01 fps
-camera frame      = 799,680 / 20.000 MHz        = 39.98 ms
+frame rate        = 24.000 MHz / 799,680        = 30.01 fps
+camera frame      = 799,680 / 24.000 MHz        = 33.32 ms
 panel frame       = 280 × 240 × 16 / 40.000 MHz = 26.88 ms  (ceiling 37.2 fps)
-                                                  13.10 ms to spare
+                                                   6.44 ms to spare
 ```
 
-The panel comfortably finishes each frame before the next VSYNC, so no frames
-are dropped. What it cannot do is keep up *during* active video:
+The panel finishes each frame before the next VSYNC, so no frames are dropped.
+What it cannot do is keep up *during* active video:
 
 ```text
-active video span = 240 × 1568 / 20.000 MHz     = 18.82 ms   (worst case)
+active video span = 240 × 1568 / 24.000 MHz     = 15.68 ms   (worst case)
 pixels in         = 280 × 240                   = 67,200
-pixels drained    = 18.82 ms × 40 MHz / 16      = 47,040
-peak FIFO         =                               20,160 pixels
+pixels drained    = 15.68 ms × 40 MHz / 16      = 39,200
+peak FIFO         =                               28,000 pixels
 ```
 
-Hence `FIFO_DEPTH = 32768` (62% used, 32 of 56 BSRAM blocks, 51% of the
-device's 1008 Kb). A *full* 280×240×16 framebuffer would be 1050 Kb and would
-not fit — but it is not needed, only the deficit is.
+Hence `FIFO_DEPTH = 40960` (68% used, 48 of 56 BSRAM blocks). `pixel_fifo`
+wraps its pointers explicitly rather than relying on natural rollover, so the
+depth need not be a power of two — which matters here, because 65536 pixels
+would be 1024 Kb and would not fit in the device's 1008 Kb of BSRAM at all. A
+*full* 280×240×16 framebuffer is 1050 Kb and likewise does not fit; only the
+deficit needs storing, and it is a quarter of that.
 
-That figure is the safe side of an open question: it assumes the sensor emits
-its 240 QVGA output lines in consecutive line periods. Vertical DCW decimation
-suggests it actually spreads them over 480, in which case the panel keeps up
-throughout and the FIFO only holds an intra-line ripple of ~140 pixels. Sizing
-for the pessimistic case costs BSRAM the device has to spare.
+The 28,000 figure assumes the sensor emits its 240 QVGA output lines in
+consecutive line periods. Two bounds either side of it:
+
+- If vertical DCW decimation spreads them over 480 line periods, as it
+  probably does, the panel keeps up throughout and the FIFO only holds an
+  intra-line ripple of a few hundred pixels.
+- If HREF had *no* horizontal blanking at all — impossible, but it is the hard
+  floor on how quickly 240 lines can arrive — the deficit would be 35,200.
+
+40960 covers even the second case, which is why it was chosen over the
+tidier 32768 (which covers 28,000 with 17% to spare but not 35,200).
 
 Run:
 
@@ -308,9 +368,10 @@ make timing        # python3 timing_check.py
 ```
 
 to recompute all of the above from the live clock parameters. It asserts the
-two conditions that must hold — the panel finishing inside a camera frame, and
-the deficit fitting in the FIFO — so it fails loudly if a clock is retuned
-without resizing the buffer.
+conditions that must hold — the panel finishing inside a camera frame, the
+deficit fitting in the FIFO, the FIFO fitting in BSRAM, and the capture clock
+staying well above PCLK — so it fails loudly if a clock is retuned without
+resizing the buffer.
 
 ---
 
@@ -365,7 +426,7 @@ Key OV7670 register deltas from the stock reference table (full table in
 | Register | Value | Purpose |
 |---|---:|---|
 | `COM7` (0x12) | 0x14 | QVGA selection + RGB output |
-| `CLKRC` (0x11) | 0x00 | no prescale: internal clock = XCLK |
+| `CLKRC` (0x11) | 0x00 | no prescale: internal clock = XCLK = 24 MHz |
 | `DBLV` (0x6B) | 0x0A | camera 4× PLL disabled |
 | `COM3` (0x0C) | 0x04 | enable downsample/crop (DCW) path |
 | `COM14` (0x3E) | 0x19 | manual QVGA scaling, PCLK / 2 |
@@ -528,9 +589,10 @@ make flash         # openFPGALoader -b tangprimer25k -f ... (SPI flash, persists
 make pattern       # diagnostic build: test pattern instead of the camera
 make prog-pattern  # load it
 
-make sim           # both testbenches
+make sim           # all three testbenches
 make sim-spi       # pad-level ODDR SPI phase
 make sim-recovery  # starved-frame deadlock / watchdog
+make sim-camera    # capture path + clock crossing, every pixel by coordinate
 make timing        # python3 timing_check.py
 make clean         # rm -rf impl
 ```
@@ -562,7 +624,7 @@ instead (`status_led.v`):
     finished. Deliberately slow and asymmetric so it cannot be mistaken for
     the flicker below.
   - *rapid flicker* — frames are completing. It toggles once per frame, so
-    ~12.5 Hz at 25 fps.
+    ~15 Hz at 30 fps.
   - *steady on or off* — initialisation finished but frames are **not**
     completing; the panel stream is stalled.
 - **DONE LED (D7)** — off means no fault has latched. Otherwise it blinks the
@@ -595,10 +657,10 @@ instead (`status_led.v`):
 
 ## 10. Bring-up checklist
 
-1. Verify `cam_xclk` (J5 p3) is approximately 20.000 MHz.
+1. Verify `cam_xclk` (J5 p3) is approximately 24.000 MHz.
 2. Verify `cam_sioc` (J4 p1) activity after reset and that the READY LED
    eventually turns on.
-3. Verify `cam_pclk` (J4 p3) is approximately 10.000 MHz during active video.
+3. Verify `cam_pclk` (J4 p3) is approximately 12.000 MHz during active video.
    A much higher value usually means `CLKRC` or `DBLV` did not take effect.
 4. Verify `tft_scl` (J6 p8) is a clean ~40 MHz square wave while streaming,
    with no runt/merged pulses — this is the first place a DDR phase mistake
@@ -628,30 +690,30 @@ device version A):
 
 | | |
 |---|---|
-| Logic | 856 / 23040 (4%) |
-| Registers | 460 / 23280 (2%) |
-| BSRAM | 33 / 56 (59%) — 32 SDPB (`pixel_fifo`), 1 pROM (`st7789_init_rom`) |
-| IOLOGIC | 4 ODDR (SCLK, MOSI, DC, CS) |
+| Logic | 955 / 23040 (5%) |
+| Registers | 656 / 23280 (3%) |
+| BSRAM | 49 / 56 (88%) — 48 SDPB (`pixel_fifo`), 1 pROM (`st7789_init_rom`) |
+| IOLOGIC | 5 ODDR (SCLK, MOSI, DC, CS, camera XCLK) |
 | I/O | 27 ports; 14 in, 12 out, 1 inout |
-| Timing | 0 setup violations, 0 hold violations |
-| Fmax | 145.4 MHz actual vs the 40.0 MHz constraint (3.6× margin) |
+| Clocks | 4 — `clk50`, and PLL outputs at 40, 24 and 100 MHz |
+| Timing | 0 setup violations, 0 hold violations over 6408 paths |
+| Worst slack | 1.09 ns, on the `clk_cap → clk_sys` FIFO read |
 
-The 25K is a much larger and faster part than the iCE40UP5K, so the recurring
-`BTN_N → tft_cs` critical path that dictated the iCE40 build's clock choice is
-no longer anywhere near binding.
-
-**Simulation.** Both testbenches pass, and both were checked against
-deliberately broken variants so they are not vacuous:
+**Simulation.** All three testbenches pass, and each was checked against a
+deliberately broken variant so none of them is vacuous:
 
 - `make sim-spi` — 105 bytes across a full init + address window + pixel burst
   reconstructed bit-exactly at the pads, 840 discrete SCLK pulses (exactly 8
-  per byte), CS low at every sampling edge, MOSI/DC stable either side of every
-  edge. Three broken pad wirings (CS without a matching cell, MOSI without the
-  mid-cycle split, SCLK without the extra delay) each fail it.
+  per byte), CS low at every sampling edge. Three broken pad wirings each fail
+  it.
 - `make sim-recovery` — a deliberately short frame must abort and the stream
-  must resume with no reset. Passes with the watchdog (3 of 3 frames complete);
-  with the watchdog removed the same testbench completes 1 of 3 and hangs,
-  which is the deadlock it exists to catch.
+  must resume with no reset. 3 of 3 frames complete; with the watchdog removed
+  the same testbench completes 1 of 3 and hangs.
+- `make sim-camera` — a synthetic OV7670 at real QVGA timing through
+  `cam_capture` and the clock crossing: all 67,200 pixels arrive, in order,
+  each matching its expected (row, column). With a 25% duty PCLK the same
+  testbench drops 10,388 pixels when sampled at 40 MHz and none at 100 MHz,
+  which is the measurement behind §4.1.
 
 The behavioural tests inherited from the iCE40 build still apply to the
 unchanged RTL: a complete rejected 280×240 frame (all 67,200 pixel strobes
@@ -660,15 +722,14 @@ checks, and an exhaustive bypass test confirming all 65,536 RGB565 values pass
 bit-for-bit while the XOR map is idle.
 
 **Confirmed on hardware.** The panel, SPI pads, ODDR phase, FIFO, frame gate
-and panel FSM all work: the diagnostic pattern build renders and animates, with
+and panel FSM all work: the diagnostic pattern build renders and animates with
 no fault latched on the DONE LED.
 
-**Not confirmed on hardware.** The camera path — SCCB configuration, the
-sensor's actual output, and `cam_capture`'s sampling of it — has not yet
-produced a verified correct image. The 25 fps figure above is derived, not
-measured. Also open: the status-LED polarity (`LED_ACTIVE_HIGH`), and whether
-your dock silkscreens the three PMOD headers in the same order as the
-schematic's J4/J5/J6.
+**Not confirmed on hardware.** The camera path has not yet produced a verified
+correct image, and none of the frame-rate work above has run on the board —
+30.0 fps is derived, not measured. Also open: the status-LED polarity
+(`LED_ACTIVE_HIGH`), and whether your dock silkscreens the three PMOD headers
+in the same order as the schematic's J4/J5/J6.
 
 ---
 
@@ -689,13 +750,15 @@ only the device-specific edges moved.
 | Reset button | `BTN_N`, active low | **S1** (H11), active high |
 | Encryption control | BTN1 sets, BTN3 clears (bounce-immune by construction) | **S2** (H10) toggles, via `btn_debounce.v` |
 | Status LEDs | `LEDG_N`/`LEDR_N`, active low | READY (E8) / DONE (D7), `LED_ACTIVE_HIGH` |
-| Pixel FIFO | 256×16, one EBR | 32768×16, 32 BSRAM |
+| Camera clock | `clk_sys`/4 = 9.75 MHz | own 24 MHz PLL output, `CLKRC` bypassed |
+| Camera capture | oversampled in `clk_sys` | own 100 MHz clock + `async_fifo` crossing |
+| Pixel FIFO | 256×16, one EBR | 40960×16, 48 BSRAM |
 | Starved frame | wedged the pipeline until reset | watchdog aborts the frame, stream resumes |
 | Status LEDs | on/off | frame heartbeat + blink-coded fault index |
 | Pin constraints | `icebreaker.pcf` (`set_io`) | `tangprimer25k.cst` (`IO_LOC`/`IO_PORT`) |
 | Dedicated pins | n/a | `build.tcl` `set_option -use_*_as_gpio` |
 | Build flow | yosys → nextpnr-ice40 → icepack → iceprog | `gw_sh` (`build.tcl`) → openFPGALoader |
-| Frame rate | ~12.19 fps | **~25.0 fps** (`CLKRC` bypassed; see [§4.1](#41-why-4000-mhz-and-why-25-fps)) |
+| Frame rate | ~12.19 fps | **~30.0 fps** (see [§4.1](#41-why-4000-mhz-and-why-30-fps)) |
 
 The one genuinely new failure mode the port introduced — and fixed — is CS
 truncating the last byte of every SPI burst, because Gowin's `ODDR` pipeline

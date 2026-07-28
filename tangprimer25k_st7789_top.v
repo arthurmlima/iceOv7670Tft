@@ -28,11 +28,25 @@
 // accumulates, which is why 256 entries sufficed -- but it also pinned the
 // frame rate at 12.5 fps while the panel could have sustained 37.2.
 //
-// CLKRC is now bypassed, so f_int = XCLK = clk_sys/2 = 20 MHz and the frame
-// rate doubles to 25.0 fps.  The camera then outruns the panel during active
-// video, and the surplus -- the integral of the rate difference over the
-// active region, up to 20160 pixels -- has to be buffered.  Hence FIFO_DEPTH
-// below.  See timing_check.py for the arithmetic.
+// CLKRC is now bypassed and XCLK comes from its own 24 MHz PLL output, so
+// f_int = 24 MHz -- the OV7670's rated maximum -- and the frame rate is
+// 30.0 fps, 2.4x the iCE40 design, with the panel still clocked at 40 MHz.
+//
+// Two consequences, both handled below:
+//
+//   * The camera outruns the panel during active video.  The surplus is the
+//     integral of the rate difference over the active region, up to 28000
+//     pixels; hence FIFO_DEPTH.  See timing_check.py.
+//
+//   * PCLK (= f_int/2 = 12 MHz) is no longer slow enough to oversample in the
+//     clk_sys domain, which gives only 4 samples per PCLK period.  cam_capture
+//     now runs on its own 100 MHz PLL output (8.3 samples per period) and
+//     async_fifo carries pixels into clk_sys.  That is the only clock-domain
+//     crossing in the design: frame_stream_gate, pixel_xor_stage and
+//     pixel_fifo all stay single-clock in clk_sys, unchanged, including
+//     pixel_fifo's flush-on-frame-boundary which could not be done safely
+//     across domains.  See README section 4.3 for why cam_capture does not
+//     simply clock on PCLK itself.
 //
 // ---------------------------------------------------------------------------
 // SPI output cells: SB_IO -> ODDR
@@ -116,35 +130,53 @@ module tangprimer25k_st7789_top #(
     output wire       cam_pwdn,
     input  wire [7:0] cam_d
 );
-    // ---------------- clock ratios ----------------
-    // cam_xclk = clk_sys/2 and CLKRC is bypassed, so the camera's internal
-    // clock is clk_sys/2 and PCLK (COM14 = /2) is clk_sys/4.  Several things
-    // below are derived from this one number.
-    localparam integer CAM_INT_DIV = 2;
+    // ---------------- camera clock ----------------
+    // CLKRC is bypassed, so the sensor's internal clock is XCLK exactly and
+    // PCLK (COM14 = /2) is half of it.
+    localparam integer CAM_XCLK_HZ = 24000000;
+    localparam integer CAM_INT_HZ  = CAM_XCLK_HZ;
 
     // Worst case the sensor emits its 240 output lines back to back, giving
-    // the panel 240*1568/f_int = 18.8 ms to drain 67200 pixels at SPI/16.
-    // It manages 47040, so 20160 have to wait.  32768 rounds that up to a
-    // power of two with 60% headroom and costs 512 Kb of the 1008 Kb of BSRAM.
-    localparam integer FIFO_DEPTH = 32768;
+    // the panel 240*1568/f_int = 15.7 ms to drain 67200 pixels at SPI/16.
+    // It manages 39200, so 28000 have to wait.  DEPTH need not be a power of
+    // two (pixel_fifo wraps its pointers explicitly), which matters here:
+    // 65536 pixels would be 1024 Kb and would not fit in the 1008 Kb of BSRAM
+    // at all, while 40960 leaves 46% headroom over the deficit and still fits.
+    localparam integer FIFO_DEPTH = 40960;
     localparam integer FIFO_AW    = $clog2(FIFO_DEPTH);
 
-    // ---------------- system clock ----------------
+    // Test-pattern timing, in clk_sys cycles, tracking the camera it stands in
+    // for: 4 internal clocks per pixel, 1568 per line.  Scaled in kHz so the
+    // products stay inside a 32-bit integer.
+    localparam integer PAT_PIX_CYCLES  = (4*(SYS_CLK_HZ/1000))/(CAM_INT_HZ/1000);
+    localparam integer PAT_LINE_CYCLES = (1568*(SYS_CLK_HZ/1000))/(CAM_INT_HZ/1000);
+
+    // ---------------- system and camera clocks ----------------
     wire clk_sys;
+    wire clk_xclk;
+    wire clk_cap;
     wire pll_lock;
 
     generate
         if (USE_PLL != 0) begin : g_pll
-            // 50 MHz -> 40 MHz.  With USE_PLL=0 clk_sys is the raw 50 MHz
-            // oscillator, in which case SYS_CLK_HZ/SPI_HZ must be overridden
-            // to 50000000 so the millisecond and SCCB dividers stay correct.
-            gowin_pll_40m pll (
+            // 50 MHz -> 40 MHz (clk_sys) and 24 MHz (camera XCLK).
+            // USE_PLL=0 is a fallback that runs clk_sys from the raw 50 MHz
+            // oscillator and gives up on 30 fps: it has no 24 MHz source, so
+            // XCLK falls back to clk_sys/2.  SYS_CLK_HZ/SPI_HZ/CAM_XCLK_HZ
+            // must be overridden to match.
+            gowin_pll pll (
                 .clkin   (clk50),
                 .clkout0 (clk_sys),
+                .clkout1 (clk_xclk),
+                .clkout2 (clk_cap),
                 .lock    (pll_lock)
             );
         end else begin : g_bypass
+            reg xclk_div = 1'b0;
+            always @(posedge clk50) xclk_div <= ~xclk_div;
             assign clk_sys  = clk50;
+            assign clk_xclk = xclk_div;
+            assign clk_cap  = clk50;
             assign pll_lock = 1'b1;
         end
     endgenerate
@@ -181,6 +213,14 @@ module tangprimer25k_st7789_top #(
     always @(posedge clk_sys)
         encryption_rst <= rst;
 
+    // Same idea for the reset that crosses into the capture domain: `rst` is
+    // combinational off the POR counter's comparator, and launching a
+    // clock-domain crossing from that much logic left the first synchroniser
+    // flop 1 ns short.  A crossing should always start at a flop.
+    reg cam_rst_q = 1'b1;
+    always @(posedge clk_sys)
+        cam_rst_q <= rst;
+
     // ---------------- frame-safe encryption control ----------------
     // The iCEBreaker had three buttons and could afford separate set (BTN1)
     // and clear (BTN3) inputs, which made contact bounce harmless because
@@ -212,15 +252,19 @@ module tangprimer25k_st7789_top #(
     end
 
     // ---------------- camera clock and static controls ----------------
-    reg cam_xclk_q = 1'b0;
-    always @(posedge clk_sys) begin
-        if (rst)
-            cam_xclk_q <= 1'b0;
-        else
-            cam_xclk_q <= ~cam_xclk_q;
-    end
+    // Forward the 24 MHz PLL output to the pad through an ODDR rather than
+    // routing a clock net to a general output: this is the standard way to get
+    // a clean full-rate, 50%-duty clock off-chip on Gowin, and it keeps the
+    // clock on clock resources right up to the pin.
+    ODDR cam_xclk_io (
+        .Q0  (cam_xclk),
+        .Q1  (),
+        .D0  (1'b1),
+        .D1  (1'b0),
+        .TX  (1'b0),
+        .CLK (clk_xclk)
+    );
 
-    assign cam_xclk  = cam_xclk_q;  // 20.000 MHz
     assign cam_rst_n = resetn;
     assign cam_pwdn  = 1'b0;
 
@@ -264,17 +308,24 @@ module tangprimer25k_st7789_top #(
     wire stream_enable = cam_cfg_done && lcd_init_done;
 
     // ---------------- pixel source ----------------
+    // The camera half lives in the PCLK domain and reaches clk_sys through
+    // async_fifo; the test pattern is generated directly in clk_sys, since it
+    // has no external strobe to follow.  Either way the rest of the design
+    // sees the same {cap_pixel, cap_wr, cap_frame_sync} interface.
     wire [15:0] cap_pixel;
     wire        cap_wr;
     wire        cap_frame_sync;
+    wire        cdc_overflow;
 
     generate
         if (PATTERN_SOURCE != 0) begin : g_pattern
+            assign cdc_overflow = 1'b0;
+
             test_pattern_src #(
                 .WIDTH       (280),
                 .HEIGHT      (240),
-                .PIX_CYCLES  (4*CAM_INT_DIV),      // 4 internal clocks/pixel
-                .LINE_CYCLES (1568*CAM_INT_DIV),
+                .PIX_CYCLES  (PAT_PIX_CYCLES),
+                .LINE_CYCLES (PAT_LINE_CYCLES),
                 .TOTAL_LINES (510)
             ) source (
                 .clk        (clk_sys),
@@ -285,18 +336,113 @@ module tangprimer25k_st7789_top #(
                 .frame_sync (cap_frame_sync)
             );
         end else begin : g_camera
+            // --- reset and enable into the capture domain ---
+            // clk_cap and clk_sys come from the same PLL, so these crossings
+            // are benign, but both signals are slow and the synchronisers cost
+            // nothing.
+            (* ASYNC_REG = "TRUE" *) reg [1:0] cap_rst_sync = 2'b11;
+            always @(posedge clk_cap)
+                cap_rst_sync <= {cap_rst_sync[0], cam_rst_q};
+            wire cap_rst = cap_rst_sync[1];
+
+            // stream_enable only changes once, hundreds of ms after reset.
+            (* ASYNC_REG = "TRUE" *) reg [1:0] cap_en_sync = 2'b00;
+            always @(posedge clk_cap) begin
+                if (cap_rst) cap_en_sync <= 2'b00;
+                else         cap_en_sync <= {cap_en_sync[0], stream_enable};
+            end
+
+            // --- capture, in the 100 MHz clk_cap domain ---
+            wire [15:0] cap_src_pixel;
+            wire        cap_src_wr;
+            wire        cap_src_frame_sync;
+
             cam_capture capture (
-                .clk        (clk_sys),
-                .rst        (rst),
-                .enable     (stream_enable),
+                .clk        (clk_cap),
+                .rst        (cap_rst),
+                .enable     (cap_en_sync[1]),
                 .pclk_i     (cam_pclk),
                 .vsync_i    (cam_vsync),
                 .href_i     (cam_href),
                 .d_i        (cam_d),
-                .pix_data   (cap_pixel),
-                .pix_wr     (cap_wr),
-                .frame_sync (cap_frame_sync)
+                .pix_data   (cap_src_pixel),
+                .pix_wr     (cap_src_wr),
+                .frame_sync (cap_src_frame_sync)
             );
+
+            // --- clk_cap -> clk_sys ---
+            // Pixels and frame boundaries share one FIFO so their order is
+            // preserved by construction.  cam_capture never emits both in the
+            // same cycle: frame_sync fires on the VSYNC edge, where HREF is
+            // low, so no byte is in flight.
+            wire        cdc_full;
+            wire        cdc_empty;
+            wire [16:0] cdc_rd_data;
+
+            // AW=3 (8 entries) rather than 16: pixels arrive one per ~17
+            // clk_cap cycles and leave one per clk_sys cycle, so occupancy
+            // never exceeds 1, and a shallower array halves the read mux
+            // feeding the clk_sys capture register.
+            async_fifo #(.WIDTH(17), .AW(3)) cdc (
+                .wr_clk  (clk_cap),
+                .wr_rst  (cap_rst),
+                .wr_en   (cap_src_wr || cap_src_frame_sync),
+                .wr_data ({cap_src_frame_sync, cap_src_pixel}),
+                .wr_full (cdc_full),
+
+                .rd_clk  (clk_sys),
+                .rd_rst  (rst),
+                .rd_en   (1'b1),
+                .rd_data (cdc_rd_data),
+                .rd_empty(cdc_empty)
+            );
+
+            // Draining one entry per clk_sys cycle is 40 M/s against an input
+            // of 6 M/s, so the FIFO sits at 0 or 1 and overflow is only
+            // reachable if clk_sys stops.  It is still reported, because a
+            // silent pixel loss here would look exactly like a camera fault.
+            reg [15:0] cap_pixel_q      = 16'h0000;
+            reg        cap_wr_q         = 1'b0;
+            reg        cap_frame_sync_q = 1'b0;
+            reg        cdc_overflow_q   = 1'b0;
+
+            always @(posedge clk_sys) begin
+                if (rst) begin
+                    cap_wr_q         <= 1'b0;
+                    cap_frame_sync_q <= 1'b0;
+                end else begin
+                    cap_wr_q         <= 1'b0;
+                    cap_frame_sync_q <= 1'b0;
+
+                    if (!cdc_empty) begin
+                        if (cdc_rd_data[16]) begin
+                            cap_frame_sync_q <= 1'b1;
+                        end else begin
+                            cap_pixel_q <= cdc_rd_data[15:0];
+                            cap_wr_q    <= 1'b1;
+                        end
+                    end
+                end
+            end
+
+            // cdc_full belongs to clk_cap; it is only ever read as a sticky
+            // "something went wrong" flag, so a two-flop sync is fine.
+            (* ASYNC_REG = "TRUE" *) reg [1:0] cdc_full_sync;
+            always @(posedge clk_sys) begin
+                if (rst) begin
+                    cdc_full_sync  <= 2'b00;
+                    cdc_overflow_q <= 1'b0;
+                end else begin
+                    cdc_full_sync <= {cdc_full_sync[0], cdc_full};
+                    if (cdc_full_sync[1])
+                        cdc_overflow_q <= 1'b1;
+                end
+            end
+
+            assign cap_pixel      = cap_pixel_q;
+            assign cap_wr         = cap_wr_q;
+            assign cap_frame_sync = cap_frame_sync_q;
+            assign cdc_overflow   = cdc_overflow_q;
         end
     endgenerate
 
@@ -476,11 +622,11 @@ module tangprimer25k_st7789_top #(
     // frozen picture is immediately distinguishable from a stalled pipeline,
     // and DONE (D7) blinks the index of the first sticky fault -- off means no
     // fault has latched at all.  See status_led.v.
-    wire [4:0] faults = {dropped_frame_error,   // 5 blinks
-                         lcd_sync_error,        // 4
-                         lcd_starve_error,      // 3
-                         fifo_underflow,        // 2
-                         fifo_overflow};        // 1
+    wire [4:0] faults = {dropped_frame_error,              // 5 blinks
+                         lcd_sync_error,                   // 4
+                         lcd_starve_error,                 // 3
+                         fifo_underflow,                   // 2
+                         fifo_overflow || cdc_overflow};   // 1
 
     wire led_ready_raw;
     wire led_fault_raw;
