@@ -183,10 +183,10 @@ clock. Both buttons pass through synchronizers before entering any logic.
 |---|---:|---|
 | Dock oscillator | 50.000 MHz | Tang Primer 25K Dock, pin E2 |
 | FPGA system clock (`clk_sys`) | 40.000 MHz | `PLLA` CLKOUT0 |
-| ST7789 SCLK | 40.000 MHz | `clk_sys`, via DDR SPI engine |
-| OV7670 XCLK | 24.000 MHz | `PLLA` CLKOUT1 |
+| ST7789 SCLK | 40.000 MHz (40.45MHZ) | `clk_sys`, via DDR SPI engine |
+| OV7670 XCLK | 24.000 MHz (55MHZ) | `PLLA` CLKOUT1 |
 | OV7670 internal clock | 24.000 MHz | XCLK, `CLKRC = 0x00` (no prescale) |
-| OV7670 PCLK | 12.000 MHz | QVGA scaling, PCLK / 2 |
+| OV7670 PCLK | 12.000 MHz (13.89MHZ) | QVGA scaling, PCLK / 2 |
 | Camera capture clock (`clk_cap`) | 100.000 MHz | `PLLA` CLKOUT2 |
 
 PLL settings: `IDIV_SEL=1`, `FBDIV_SEL=1`, `MDIV_SEL=24` (`f_vco = 50 MHz ×
