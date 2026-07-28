@@ -1,7 +1,0 @@
-# Gowin build outputs (gw_sh writes everything under impl/)
-impl/
-
-# Gowin IDE per-user project state
-*.gprj.user
-
-.DS_Store

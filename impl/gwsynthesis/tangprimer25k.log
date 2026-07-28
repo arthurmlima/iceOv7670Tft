@@ -1,0 +1,55 @@
+GowinSynthesis start
+Running parser ...
+Analyzing Verilog file '/Users/arthur/tangprimer25k/tangprimer25k_st7789_top.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/gowin_pll.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/async_fifo.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/tangprimer25k_pattern_top.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/status_led.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/test_pattern_src.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/btn_debounce.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/cam_init.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/cam_capture.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/frame_stream_gate.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/pixel_xor_stage.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/xormap_32.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/pixel_fifo.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/st7789_camera_ctrl.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/st7789_init_rom.v'
+Analyzing Verilog file '/Users/arthur/tangprimer25k/spi_stream_tx.v'
+Compiling module 'tangprimer25k_st7789_top'("/Users/arthur/tangprimer25k/tangprimer25k_st7789_top.v":87)
+Compiling module 'gowin_pll'("/Users/arthur/tangprimer25k/gowin_pll.v":33)
+Compiling module 'btn_debounce'("/Users/arthur/tangprimer25k/btn_debounce.v":17)
+Compiling module 'cam_init'("/Users/arthur/tangprimer25k/cam_init.v":38)
+Compiling module 'cam_capture'("/Users/arthur/tangprimer25k/cam_capture.v":45)
+Compiling module 'async_fifo(AW=3)'("/Users/arthur/tangprimer25k/async_fifo.v":34)
+Extracting RAM for identifier 'mem'("/Users/arthur/tangprimer25k/async_fifo.v":57)
+Compiling module 'frame_stream_gate'("/Users/arthur/tangprimer25k/frame_stream_gate.v":14)
+Compiling module 'pixel_xor_stage(INITIAL_SEED=32'b00011010110011101011000000001100)'("/Users/arthur/tangprimer25k/pixel_xor_stage.v":15)
+Compiling module 'xormap_32'("/Users/arthur/tangprimer25k/xormap_32.v":13)
+Compiling module 'pixel_fifo(DEPTH=40960,AW=16)'("/Users/arthur/tangprimer25k/pixel_fifo.v":18)
+Extracting RAM for identifier 'mem'("/Users/arthur/tangprimer25k/pixel_fifo.v":40)
+Compiling module 'st7789_camera_ctrl'("/Users/arthur/tangprimer25k/st7789_camera_ctrl.v":15)
+Compiling module 'st7789_init_rom(MADCTL_VAL=8'b10100000)'("/Users/arthur/tangprimer25k/st7789_init_rom.v":18)
+Compiling module 'spi_stream_tx'("/Users/arthur/tangprimer25k/spi_stream_tx.v":35)
+Compiling module 'status_led'("/Users/arthur/tangprimer25k/status_led.v":33)
+NOTE  (EX0101) : Current top module is "tangprimer25k_st7789_top"
+[5%] Running netlist conversion ...
+Running device independent optimization ...
+[10%] Optimizing Phase 0 completed
+[15%] Optimizing Phase 1 completed
+[25%] Optimizing Phase 2 completed
+Running inference ...
+[30%] Inferring Phase 0 completed
+[40%] Inferring Phase 1 completed
+[50%] Inferring Phase 2 completed
+[55%] Inferring Phase 3 completed
+Running technical mapping ...
+[60%] Tech-Mapping Phase 0 completed
+[65%] Tech-Mapping Phase 1 completed
+[75%] Tech-Mapping Phase 2 completed
+[80%] Tech-Mapping Phase 3 completed
+[90%] Tech-Mapping Phase 4 completed
+WARN  (NL0002) : The module "st7789_init_rom" instantiated to "init_rom" is swept in optimizing("/Users/arthur/tangprimer25k/st7789_camera_ctrl.v":111)
+[95%] Generate netlist file "/Users/arthur/tangprimer25k/impl/gwsynthesis/tangprimer25k.vg" completed
+[100%] Generate report file "/Users/arthur/tangprimer25k/impl/gwsynthesis/tangprimer25k_syn.rpt.html" completed
+GowinSynthesis finish

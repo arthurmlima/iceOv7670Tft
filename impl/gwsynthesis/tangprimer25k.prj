@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE gowin-synthesis-project>
+<Project>
+    <Version>beta</Version>
+    <Device id="GW5A-25A" package="MBGA121N" speed="1" partNumber="GW5A-LV25MG121NC1/I0"/>
+    <FileList>
+        <File path="/Users/arthur/tangprimer25k/tangprimer25k_st7789_top.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/gowin_pll.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/async_fifo.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/tangprimer25k_pattern_top.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/status_led.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/test_pattern_src.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/btn_debounce.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/cam_init.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/cam_capture.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/frame_stream_gate.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/pixel_xor_stage.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/xormap_32.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/pixel_fifo.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/st7789_camera_ctrl.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/st7789_init_rom.v" type="verilog"/>
+        <File path="/Users/arthur/tangprimer25k/spi_stream_tx.v" type="verilog"/>
+    </FileList>
+    <OptionList>
+        <Option type="disable_insert_pad" value="0"/>
+        <Option type="enable_dsrm" value="0"/>
+        <Option type="global_freq" value="100.000"/>
+        <Option type="looplimit" value="2000"/>
+        <Option type="output_file" value="/Users/arthur/tangprimer25k/impl/gwsynthesis/tangprimer25k.vg"/>
+        <Option type="print_all_synthesis_warning" value="0"/>
+        <Option type="ram_rw_check" value="0"/>
+        <Option type="top_module" value="tangprimer25k_st7789_top"/>
+        <Option type="vcc" value="0.9"/>
+        <Option type="verilog_language" value="verilog-2001"/>
+        <Option type="vhdl_language" value="vhdl-1993"/>
+    </OptionList>
+</Project>
