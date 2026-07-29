@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Module name="tangprimer25k_st7789_top" Register="28" Alu="18" Lut="12" T_Register="460(28)" T_Alu="110(18)" T_Lut="747(12)" T_Bsram="33(0)">
+<Module name="tangprimer25k_st7789_top" Register="27" Alu="18" Lut="12" T_Register="459(27)" T_Alu="110(18)" T_Lut="740(12)" T_Bsram="33(0)">
  <SubModule name="g_pll.pll"/>
- <SubModule name="s2_button" Register="23" Alu="18" Lut="14" T_Register="23(23)" T_Alu="18(18)" T_Lut="14(14)"/>
- <SubModule name="camera_config" Register="73" Alu="12" Lut="101" Bsram="1" T_Register="73(73)" T_Alu="12(12)" T_Lut="101(101)" T_Bsram="1(1)"/>
+ <SubModule name="s2_button" Register="23" Alu="18" Lut="13" T_Register="23(23)" T_Alu="18(18)" T_Lut="13(13)"/>
+ <SubModule name="camera_config" Register="73" Alu="12" Lut="100" Bsram="1" T_Register="73(73)" T_Alu="12(12)" T_Lut="100(100)" T_Bsram="1(1)"/>
  <SubModule name="g_camera.capture" Register="71" Lut="41" T_Register="71(71)" T_Lut="41(41)"/>
  <SubModule name="frame_gate" Register="3" Lut="2" T_Register="3(3)" T_Lut="2(2)"/>
- <SubModule name="encryption" Register="33" Lut="20" T_Register="66(33)" T_Lut="136(20)">
-  <SubModule name="g_xormap.map" Register="33" Lut="116" T_Register="33(33)" T_Lut="116(116)"/>
+ <SubModule name="encryption" Register="33" Lut="19" T_Register="66(33)" T_Lut="133(19)">
+  <SubModule name="g_xormap.map" Register="33" Lut="114" T_Register="33(33)" T_Lut="114(114)"/>
  </SubModule>
  <SubModule name="fifo" Register="50" Alu="28" Lut="86" Bsram="32" T_Register="50(50)" T_Alu="28(28)" T_Lut="86(86)" T_Bsram="32(32)"/>
- <SubModule name="display" Register="85" Alu="19" Lut="267" T_Register="100(85)" T_Alu="19(19)" T_Lut="284(267)">
+ <SubModule name="display" Register="85" Alu="19" Lut="266" T_Register="100(85)" T_Alu="19(19)" T_Lut="283(266)">
   <SubModule name="spi" Register="15" Lut="17" T_Register="15(15)" T_Lut="17(17)"/>
  </SubModule>
- <SubModule name="status" Register="46" Alu="15" Lut="71" T_Register="46(46)" T_Alu="15(15)" T_Lut="71(71)"/>
+ <SubModule name="status" Register="46" Alu="15" Lut="70" T_Register="46(46)" T_Alu="15(15)" T_Lut="70(70)"/>
 </Module>

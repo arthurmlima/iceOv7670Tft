@@ -13,18 +13,55 @@
 //
 // A 3-phase write is {0x42, reg, val} = 27 clocked bits at ~100 kHz, one
 // register per ~290 us, with a 2 ms gap between writes and a 10 ms gap after
-// each COM7 soft reset. Whole table (118 entries) ~290 ms - still long done
+// each COM7 soft reset. Whole table (119 entries) ~290 ms - still long done
 // before the ST7789 finishes its own (~500 ms) init.
 //
 // ---------------------------------------------------------------------------
 // Register table = the proven camera.h set, with exactly these deltas:
 //
 //   COM7  0x04 -> 0x14   select QVGA as well as RGB
-//   CLKRC 0x00 -> 0x00   internal clock = XCLK = 20.000 MHz (no prescale)
+//   CLKRC 0x00 -> CLKRC_VAL   see the clock note below
 //   DBLV  0x4A -> 0x0A   PLL x4 OFF (x4 would quadruple everything)
 //   COM3  0x00 -> 0x04   enable DCW              \
 //   COM14 0x00 -> 0x19   manual scaling, PCLK/2   > QVGA, PCLK 10.000 MHz
 //   + 0x70..0x73, 0xA2   canonical scaling regs  /
+//
+// ---------------------------------------------------------------------------
+// CLKRC and this sensor's clock registers -- read before changing CLKRC_VAL
+// ---------------------------------------------------------------------------
+// The sensor on this board divides XCLK by 2 *more* than the datasheet says
+// it should.  There is exactly one hardware measurement behind that, and it
+// is worth stating precisely because everything here rests on it:
+//
+//   XCLK 20 MHz, CLKRC = 0x00 (prescale field 0, nominally /1)
+//     -> PCLK 5 MHz, VSYNC 12.5 Hz, HREF 3.19 kHz
+//     -> f_int = 10 MHz = XCLK/2, i.e. a factor of 2 nobody asked for.
+//
+// The three measured numbers are mutually consistent, so this is f_int and
+// not a mis-read.  A lost SCCB write does not explain it either: CLKRC's own
+// reset default (0x80) has a zero prescale field too, so a write that never
+// landed would still have given /1, and PCLK/HREF = 1568 proves the QVGA/DCW
+// writes in this same table do land.  The likeliest mechanism is the reserved
+// bit[7], which resets to 1 and which 0x00 clears -- unconfirmed.
+//
+// What is NOT known is whether CLKRC's prescale field works at all on this
+// part.  So the design changes exactly one variable away from the measured
+// baseline: CLKRC stays at the 0x00 that was measured, and XCLK doubles to
+// clk_sys = 40 MHz, which should carry f_int to 20 MHz and 25.01 fps whatever
+// the extra /2 turns out to be.
+//
+// If that lands, the divide chain is f_int = XCLK / (2 * (CLKRC[5:0]+1)) and
+// CAM_XCLK_DIV/CAM_CLKRC must thereafter move together -- doubling XCLK while
+// adding a prescale /2 would cancel exactly.  If instead PCLK comes out at
+// 20 MHz, there is no fixed /2, and CAM_XCLK_DIV=2 is the answer.  Measure
+// XCLK on the pin before believing either: 20 MHz there means the running
+// bitstream is not this one.
+//
+// DBLV is written *before* any CLKRC write (entry 3): on OmniVision parts the
+// clock divider has to be programmed after the PLL setting, because changing
+// DBLV re-latches the clock chain.  CLKRC is then written three times -- once
+// mid-table, once where DBLV used to sit, and once as the final entry, after
+// the AEC/AWB block -- so nothing can be left holding an earlier value.
 //   RGB444 0x03 -> 0x00  RGB444 OFF  \  the old table left the sensor in
 //   COM15  0xF0 -> 0xD0  true RGB565 /  444/555 mode; the panel needs 565
 //
@@ -39,7 +76,10 @@ module cam_init #(
     parameter TICK_DIV   = 100,    // 40.00 MHz / 100 = 400 kHz quarter tick
     parameter BOOT_TICKS = 4000,   // ~10 ms after reset before first write
     parameter GAP_TICKS  = 800,    // ~2 ms between writes
-    parameter RST_TICKS  = 4000    // ~10 ms settle after COM7 reset writes
+    parameter RST_TICKS  = 4000,   // ~10 ms settle after COM7 reset writes
+    // CLKRC (0x11).  Must agree with the top level's XCLK divider so that
+    // f_int lands on 20 MHz -- see the clock note in the file header.
+    parameter [7:0] CLKRC_VAL = 8'h00
 )(
     input  wire clk,
     input  wire rst,
@@ -56,7 +96,8 @@ module cam_init #(
                 6'd0 :  rom = 16'h1280;  // COM7   soft reset
                 6'd1 :  rom = 16'h1280;  // COM7   soft reset (twice, as proven)
                 6'd2 :  rom = 16'h1214;  // COM7   QVGA + RGB output
-                6'd3 :  rom = 16'h1100;  // CLKRC  no prescale: f_int = XCLK
+                6'd3 :  rom = 16'h6B0A;  // DBLV   PLL bypass -- must precede
+                                        //        every CLKRC write below
                 6'd4 :  rom = 16'h0C04;  // COM3   DCW enable (was 0x00)   [changed]
                 6'd5 :  rom = 16'h3E19;  // COM14  manual scale, PCLK/2    [changed]
                 6'd6 :  rom = 16'h8C00;  // RGB444 disable (was 0x03)      [changed]
@@ -72,7 +113,7 @@ module cam_init #(
                 6'd16:  rom = 16'h54E4;  // MTX6  /
                 6'd17:  rom = 16'h589E;  // MTXS
                 6'd18:  rom = 16'h3DC0;  // COM13  gamma en, UV auto
-                6'd19:  rom = 16'h1100;  // CLKRC  no prescale again
+                6'd19:  rom = {8'h11, CLKRC_VAL};  // CLKRC  (1 of 3)
                 6'd20:  rom = 16'h1711;  // HSTART
                 6'd21:  rom = 16'h1861;  // HSTOP
                 6'd22:  rom = 16'h32A4;  // HREF
@@ -95,7 +136,8 @@ module cam_init #(
                 6'd39:  rom = 16'h4D40;
                 6'd40:  rom = 16'h4E20;
                 6'd41:  rom = 16'h6900;  // GFIX
-                6'd42:  rom = 16'h6B0A;  // DBLV  PLL bypass (was 0x4A)    [changed]
+                6'd42:  rom = {8'h11, CLKRC_VAL};  // CLKRC  (2 of 3)
+                                                   // (DBLV moved to entry 3)
                 6'd43:  rom = 16'h7410;
                 6'd44:  rom = 16'h8D4F;
                 6'd45:  rom = 16'h8E00;
@@ -130,7 +172,10 @@ module cam_init #(
                 7'd61:  rom = 16'h2495;  // AEW     AEC/AGC stable region, upper limit
                 7'd62:  rom = 16'h2533;  // AEB     AEC/AGC stable region, lower limit
                 7'd63:  rom = 16'h26E3;  // VPT     fast-mode large-step threshold
-                7'd64:  rom = 16'h3B03;  // COM11   EXP | HZAUTO: night mode + auto 50/60 Hz banding detect
+                // COM11 = EXP (0x02) | HZAUTO (0x10).  Night mode (bit[7])
+                // stays off: it buys low-light exposure by dropping the frame
+                // rate, which is the one thing this design cannot afford.
+                7'd64:  rom = 16'h3B12;  // COM11   auto 50/60 Hz banding detect
                 7'd65:  rom = 16'hA505;  // BD50MAX max banding step, 50 Hz
                 7'd66:  rom = 16'hAB07;  // BD60MAX max banding step, 60 Hz
                 7'd67:  rom = 16'h9F78;  // HAECC1
@@ -204,12 +249,17 @@ module cam_init #(
                 7'd116: rom = 16'h88D7;
                 7'd117: rom = 16'h89E8;
 
+                // Last word in: nothing after this point can leave the clock
+                // divider holding a value the rest of the design did not size
+                // its FIFO and frame budget for.
+                7'd118: rom = {8'h11, CLKRC_VAL};  // CLKRC  (3 of 3)
+
                 default: rom = 16'hFFFF; // end marker
             endcase
         end
     endfunction
 
-    localparam [6:0] N_ENTRIES = 7'd118;  // entries 0..117 above
+    localparam [6:0] N_ENTRIES = 7'd119;  // entries 0..118 above
 
     // ---------------- quarter-bit tick (~400 kHz) ----------------
     reg [$clog2(TICK_DIV)-1:0] div;

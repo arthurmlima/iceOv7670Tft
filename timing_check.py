@@ -7,17 +7,28 @@ never accumulated and 256 entries were plenty.  That balance is also what
 pinned the frame rate at 12.5 fps, because it forced the camera's internal
 clock down to clk_sys/4.
 
-Bypassing CLKRC doubles the internal clock and so doubles the frame rate, at
-the cost of leaving that regime: the camera now outruns the panel during
-active video, and the surplus has to be held.  This script sizes that surplus
-and checks the two conditions that still have to hold.
+Doubling the internal clock doubles the frame rate, at the cost of leaving
+that regime: the camera now outruns the panel during active video, and the
+surplus has to be held.  This script sizes that surplus and checks the
+conditions that still have to hold.
+
+CAM_XCLK_DIV/CAM_CLKRC below mirror the top-level parameters of the same name
+and must be kept in step with them.  What matters is their product: the
+sensor's internal clock has to land on 20 MHz, and *how* the two divisions are
+split between the fabric and the sensor is a property of the sensor fitted,
+not of this design.  See the clock note in cam_init.v.
 """
 
 SYS_HZ = 40_000_000     # Tang Primer 25K: PLLA 50 MHz -> 40 MHz
 SPI_HZ = 40_000_000     # full-rate DDR SPI engine: SPI_HZ = SYS_HZ
-XCLK_HZ = SYS_HZ / 2
-CLKRC_DIV = 1           # CLKRC = 0x00, no prescale
-CAM_INT_HZ = XCLK_HZ / CLKRC_DIV
+
+CAM_XCLK_DIV = 1        # fabric: XCLK = clk_sys / CAM_XCLK_DIV
+CAM_CLKRC = 0x00        # sensor: CLKRC[5:0] prescale
+CAM_FIXED_DIV = 2       # sensor: undocumented fixed divide, measured
+
+XCLK_HZ = SYS_HZ / CAM_XCLK_DIV
+CLKRC_DIV = (CAM_CLKRC & 0x3F) + 1
+CAM_INT_HZ = XCLK_HZ / (CAM_FIXED_DIV * CLKRC_DIV)
 PCLK_HZ = CAM_INT_HZ / 2        # COM14 PCLK divider
 
 # OV7670 frame geometry, in internal-clock cycles.  510 lines of 1568 whatever
@@ -60,11 +71,16 @@ assert deficit_pixels <= FIFO_DEPTH, \
 assert FIFO_DEPTH * BITS_PER_PIXEL <= BSRAM_BITS, "FIFO does not fit in BSRAM"
 assert clk_per_pclk >= 4, \
     f"cam_capture needs >=4 clk_sys per PCLK, has {clk_per_pclk:.1f}"
+assert 10e6 <= XCLK_HZ <= 48e6, \
+    f"XCLK {XCLK_HZ/1e6:.3f} MHz is outside the sensor's 10-48 MHz range"
+assert abs(fps - 25.0) < 0.5, \
+    f"target is 25 fps, this parameter pair gives {fps:.2f}"
 
 print(f"System clock:          {SYS_HZ/1e6:.6f} MHz")
 print(f"ST7789 SPI clock:      {SPI_HZ/1e6:.6f} MHz")
-print(f"OV7670 XCLK:           {XCLK_HZ/1e6:.6f} MHz")
-print(f"OV7670 internal clock: {CAM_INT_HZ/1e6:.6f} MHz  (CLKRC /{CLKRC_DIV})")
+print(f"OV7670 XCLK:           {XCLK_HZ/1e6:.6f} MHz  (clk_sys /{CAM_XCLK_DIV})")
+print(f"OV7670 internal clock: {CAM_INT_HZ/1e6:.6f} MHz  "
+      f"(fixed /{CAM_FIXED_DIV}, CLKRC 0x{CAM_CLKRC:02X} = /{CLKRC_DIV})")
 print(f"OV7670 PCLK:           {PCLK_HZ/1e6:.6f} MHz")
 print()
 print(f"Frame rate:            {fps:.2f} fps   = f_int / {CAM_FRAME_INT_CYCLES}")

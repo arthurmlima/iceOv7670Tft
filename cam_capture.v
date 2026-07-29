@@ -3,13 +3,13 @@
 // ============================================================================
 // cam_capture.v - OV7670 RGB565 receiver in the 40.00 MHz system domain.
 //
-// PCLK is treated as data, not as a clock.  With XCLK=20.000 MHz, CLKRC
-// bypassed and COM14 PCLK=/2, PCLK is 10.000 MHz: four clk_sys periods per
-// PCLK period, two per phase.
+// PCLK is treated as data, not as a clock.  With f_int = 20.000 MHz (however
+// the top level's CAM_XCLK_DIV/CAM_CLKRC pair gets there) and COM14 PCLK=/2,
+// PCLK is 10.000 MHz: four clk_sys periods per PCLK period, two per phase.
 //
 // Four is the floor for this scheme, and it is a structural floor rather
-// than a tunable one: CLKRC bypass makes PCLK = clk_sys/4 whatever clk_sys
-// is, so raising the system clock does not buy any back.  It still works --
+// than a tunable one: 25 fps fixes f_int at clk_sys/2, so PCLK is clk_sys/4
+// whatever clk_sys is and raising it does not buy any back.  It still works --
 // pclk_s[1]/pclk_s[2] are the second and third synchronizer stages, so an
 // edge cannot be missed while each phase gets a sample -- but the tolerance
 // to PCLK duty-cycle distortion drops from +/-3 cycles to +/-1.  Going any

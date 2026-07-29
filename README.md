@@ -123,7 +123,7 @@ flowchart LR
     subgraph CLK["Clock generation"]
         OSC["50 MHz\ndock oscillator (E2)"] --> PLL["PLLA\nIDIV=1 FBDIV=1\nMDIV=24 ODIV0=30"]
         PLL --> SYS["clk_sys\n40.00 MHz"]
-        SYS -- "÷2 toggle" --> XCLKW["cam_xclk\n20.000 MHz\n= f_int, CLKRC bypassed"]
+        SYS -- "ODDR pad copy" --> XCLKW["cam_xclk\n40.000 MHz\nsensor ÷2 → f_int 20 MHz"]
     end
 
     subgraph RST["Reset"]
@@ -179,8 +179,8 @@ clock. Both buttons pass through synchronizers before entering any logic.
 | Dock oscillator | 50.000 MHz | Tang Primer 25K Dock, pin E2 |
 | FPGA system clock (`clk_sys`) | 40.000 MHz | `PLLA` |
 | ST7789 SCLK | 40.000 MHz | `clk_sys`, via DDR SPI engine |
-| OV7670 XCLK | 20.000 MHz | `clk_sys` / 2 |
-| OV7670 internal clock | 20.000 MHz | XCLK, `CLKRC = 0x00` (no prescale) |
+| OV7670 XCLK | 40.000 MHz | `clk_sys`, via `ODDR` pad cell (`CAM_XCLK_DIV=1`) |
+| OV7670 internal clock | 20.000 MHz | XCLK / 2 — this sensor's fixed divide, with `CAM_CLKRC=0x00` (prescale ÷1) |
 | OV7670 PCLK | 10.000 MHz | QVGA scaling, PCLK / 2 |
 
 PLL settings: `IDIV_SEL=1`, `FBDIV_SEL=1`, `MDIV_SEL=24`, `ODIV0_SEL=30`
@@ -198,10 +198,9 @@ The OV7670's frame period is a fixed number of internal clocks. QVGA decimates
 the *output*; it does not shorten the array scan. So nothing about the panel,
 the SPI rate or the crop changes the frame rate — only `f_int` does.
 
-`clk_sys` is therefore chosen by the two absolute limits rather than by frame
-rate: ST7789 SCLK at 40 MHz (the iCE40 build's proven 39 MHz, rounded to a
-clean PLL ratio) and OV7670 XCLK at 20 MHz (inside the sensor's 10–48 MHz
-range). Running `clk_sys` straight off the 50 MHz oscillator would push SCLK
+`clk_sys` is therefore chosen by the panel rather than by frame rate: ST7789
+SCLK at 40 MHz (the iCE40 build's proven 39 MHz, rounded to a clean PLL
+ratio). Running `clk_sys` straight off the 50 MHz oscillator would push SCLK
 to 50 MHz, which is headroom the panel has not been tested at here.
 
 **What changed from the iCEBreaker design.** It ran `f_int` at `clk_sys/4`
@@ -217,21 +216,69 @@ With the rates identical the FIFO never accumulates — one pixel in, one out �
 which is why 256 entries sufficed. But that same balance pinned the frame rate
 at 12.5 fps while the panel could sustain 37.2.
 
-`CLKRC` is now bypassed (`0x00` instead of `0x01`), so `f_int = XCLK =
-clk_sys/2 = 20 MHz` and the frame rate doubles to **25.0 fps**. The camera now
-outruns the panel during active video, and the surplus has to be held — see
+`f_int` is now 20 MHz, so the frame rate is **25.0 fps**. The camera outruns
+the panel during active video, and the surplus has to be held — see
 [§5](#5-frame-rate-and-buffering). That surplus is the *only* reason the FIFO
 grew; nothing else in the datapath changed.
 
+#### How `f_int` gets to 20 MHz — and why not via `CLKRC`
+
+The obvious route is XCLK = `clk_sys/2` = 20 MHz with the `CLKRC` prescaler at
+÷1. It does not work, because **the sensor fitted here divides XCLK by 2 more
+than the datasheet says.** One hardware measurement establishes that, and it
+is the only camera-clock measurement this design has:
+
+| XCLK | `CLKRC` | prescale asked for | expected `f_int` | measured |
+|---:|---:|---:|---:|---:|
+| 20 MHz | `0x00` | ÷1 | 20 MHz | **10 MHz** — PCLK 5 MHz, VSYNC 12.5 Hz, HREF 3.19 kHz |
+
+The three measured numbers are mutually consistent (`PCLK = f_int/2`,
+`fps = f_int/799,680`, and HREF at half the line rate as QVGA DCW implies), so
+that is genuinely `f_int` and not a mis-read. A lost SCCB write does not
+explain it: `CLKRC`'s reset default (`0x80`) has a zero prescale field too, so
+a write that never landed would still have given ÷1, and `PCLK/HREF = 1568`
+proves the QVGA/DCW writes in the same table *do* land. The likeliest
+mechanism is the reserved bit[7], which resets to 1 and which `0x00` clears —
+unconfirmed.
+
+What is *not* known is whether the prescale field works on this part at all.
+So the design moves exactly one variable away from the measured baseline:
+`CLKRC` keeps the `0x00` that was measured, and XCLK carries the factor of two
+instead.
+
+```text
+XCLK = clk_sys = 40 MHz  →  sensor ÷2  →  f_int = 20 MHz  →  25.01 fps
+```
+
+40 MHz is inside the sensor's 10–48 MHz XCLK range. `clk_sys` cannot come out
+of a fabric flop at full rate, so `cam_xclk` is emitted from an `ODDR` pad
+cell (`D0=1, D1=0`), the same primitive the SPI pads use.
+
+`CAM_XCLK_DIV = 1` and `CAM_CLKRC = 0x00` are the two halves of this. If the
+÷2 is real and fixed, they must thereafter **move together** — doubling XCLK
+while adding a prescale ÷2 cancels exactly, and lands back on 12.5 fps.
+`CAM_INT_DIV`, and through it the test-pattern source's line/pixel timing, is
+derived from `CAM_XCLK_DIV × 2 × prescale`, so the rest of the design follows
+automatically; `timing_check.py` mirrors the same chain and asserts 25 fps.
+
+**Verify XCLK on the pin before interpreting anything downstream.** It must
+read 40 MHz. If it reads 20 MHz the running bitstream is not this design, and
+no register value can matter — see the note on `make prog` vs `make flash` in
+[§8](#8-build-and-programming). If XCLK is 40 MHz and PCLK comes out at
+20 MHz rather than 10, there is no fixed ÷2 after all and `CAM_XCLK_DIV=2` is
+the answer.
+
 The remaining step to 30 fps (the OV7670's rated QVGA maximum) is not a
-register change. `PCLK` is `clk_sys/4` once `CLKRC` is bypassed — structurally,
-whatever `clk_sys` is — and that is the floor for `cam_capture`'s 2-flop
-sampling of PCLK as data. Going faster means clocking *on* PCLK instead of
-sampling it, i.e. a genuine second clock domain.
+register change. `PCLK` is `clk_sys/4` at 25 fps — structurally, whatever
+`clk_sys` is — and that is the floor for `cam_capture`'s 2-flop sampling of
+PCLK as data. Going faster means clocking *on* PCLK instead of sampling it,
+i.e. a genuine second clock domain.
 
 `USE_PLL=0` bypasses the PLL and clocks the design from the raw 50 MHz
 oscillator; if you do that, override `SYS_CLK_HZ` and `SPI_HZ` to `50000000`
-so the millisecond and SCCB dividers stay correct.
+so the millisecond and SCCB dividers stay correct — and note that it also puts
+XCLK at 50 MHz, past the sensor's 48 MHz maximum, so `CAM_XCLK_DIV=2` becomes
+mandatory (at 12.5 fps, unless that sensor honours `CLKRC`).
 
 ### 4.2 SPI pad cells: `SB_IO` → `ODDR`
 
@@ -365,7 +412,7 @@ Key OV7670 register deltas from the stock reference table (full table in
 | Register | Value | Purpose |
 |---|---:|---|
 | `COM7` (0x12) | 0x14 | QVGA selection + RGB output |
-| `CLKRC` (0x11) | 0x00 | no prescale: internal clock = XCLK |
+| `CLKRC` (0x11) | 0x00 | prescale ÷1; sensor's own fixed ÷2 then gives `f_int` = 20 MHz (see [§4.1](#41-why-4000-mhz-and-why-25-fps)) |
 | `DBLV` (0x6B) | 0x0A | camera 4× PLL disabled |
 | `COM3` (0x0C) | 0x04 | enable downsample/crop (DCW) path |
 | `COM14` (0x3E) | 0x19 | manual QVGA scaling, PCLK / 2 |
@@ -535,6 +582,19 @@ make timing        # python3 timing_check.py
 make clean         # rm -rf impl
 ```
 
+**`make prog` does not survive a power cycle.** It configures SRAM only; the
+FPGA reloads from SPI flash on every power-up and on any reconfigure, so a
+board that is unplugged, reset, or re-powered between programming and
+measuring is running the *old* image, not the one just built. If measurements
+do not move after a rebuild, this is the first thing to rule out — use
+`make flash`, and confirm with a signal that changed by construction:
+
+```sh
+make flash
+# then, on a scope: cam_xclk (J5 p3) must read 40.000 MHz.
+# 20 MHz means the running bitstream predates the 25 fps work.
+```
+
 `make pattern` swaps in `test_pattern_src` — same pins, same constraints, same
 downstream RTL, but a known frame-static picture with the camera's exact pixel,
 line and frame timing. It bisects the pipeline: a clean, square, stable grid
@@ -595,11 +655,23 @@ instead (`status_led.v`):
 
 ## 10. Bring-up checklist
 
-1. Verify `cam_xclk` (J5 p3) is approximately 20.000 MHz.
+1. Verify `cam_xclk` (J5 p3) is approximately 40.000 MHz (20.000 MHz if built
+   with `CAM_XCLK_DIV=2`).
 2. Verify `cam_sioc` (J4 p1) activity after reset and that the READY LED
    eventually turns on.
-3. Verify `cam_pclk` (J4 p3) is approximately 10.000 MHz during active video.
-   A much higher value usually means `CLKRC` or `DBLV` did not take effect.
+3. Verify `cam_pclk` (J4 p3) is approximately 10.000 MHz. This is the single
+   number that decides the frame rate — `f_int = 2 × PCLK` and
+   `fps = f_int/799,680` — so check it before believing anything else:
+
+   | PCLK | `f_int` | fps | meaning |
+   |---:|---:|---:|---|
+   | 10 MHz | 20 MHz | 25.0 | correct |
+   | 5 MHz | 10 MHz | 12.5 | sensor divided XCLK by 4, not 2 — check XCLK really is 40 MHz, then `CAM_CLKRC` really is `0x00` ([§4.1](#41-why-4000-mhz-and-why-25-fps)) |
+   | 20 MHz | 40 MHz | 50 | the fixed ÷2 is absent on this part; `cam_capture` cannot sample this — set `CAM_XCLK_DIV=2` |
+
+   VSYNC and HREF are worth cross-checking but neither is a substitute: VSYNC
+   is a narrow pulse that cheap counters mis-trigger on, and in QVGA HREF runs
+   at half the line rate (`PCLK/HREF = 1568` when DCW is working).
 4. Verify `tft_scl` (J6 p8) is a clean ~40 MHz square wave while streaming,
    with no runt/merged pulses — this is the first place a DDR phase mistake
    would show up. If the panel shows garbled or shifted color data instead
@@ -609,8 +681,9 @@ instead (`status_led.v`):
    `{d_s1, hi_byte}` in `cam_capture.v`.
 6. If the image is mirrored or upside down, try ST7789 `MADCTL=0x60` or
    adjust OV7670 `MVFP` register `0x1E`.
-7. If the DONE LED turns on, probe XCLK/PCLK first; the design depends on
-   the camera accepting `CLKRC=0x01` and `DBLV=0x0A`.
+7. If the DONE LED turns on, probe XCLK/PCLK first; the design depends only on
+   the camera dividing XCLK by 2, not on it accepting any particular `CLKRC`
+   or `DBLV` value.
 8. If both status LEDs read inverted (fault LED on at rest, ready LED off
    once streaming), set `LED_ACTIVE_HIGH=0`.
 9. If the picture is wrong in any way, run `make pattern && make prog-pattern`
@@ -695,7 +768,7 @@ only the device-specific edges moved.
 | Pin constraints | `icebreaker.pcf` (`set_io`) | `tangprimer25k.cst` (`IO_LOC`/`IO_PORT`) |
 | Dedicated pins | n/a | `build.tcl` `set_option -use_*_as_gpio` |
 | Build flow | yosys → nextpnr-ice40 → icepack → iceprog | `gw_sh` (`build.tcl`) → openFPGALoader |
-| Frame rate | ~12.19 fps | **~25.0 fps** (`CLKRC` bypassed; see [§4.1](#41-why-4000-mhz-and-why-25-fps)) |
+| Frame rate | ~12.19 fps | **~25.0 fps** (XCLK doubled to 40 MHz; see [§4.1](#41-why-4000-mhz-and-why-25-fps)) |
 
 The one genuinely new failure mode the port introduced — and fixed — is CS
 truncating the last byte of every SPI burst, because Gowin's `ODDR` pipeline

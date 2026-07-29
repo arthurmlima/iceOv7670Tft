@@ -14,9 +14,8 @@
 // ---------------------------------------------------------------------------
 // The dock oscillator is 50.000 MHz (the iCEBreaker's was 12 MHz), so the PLL
 // settings had to be recomputed.  clk_sys is 40.000 MHz, deliberately close to
-// the iCE40 build's 39.000 MHz, which keeps the two absolute limits at values
-// that were already exercised on hardware: ST7789 SCLK at 40 MHz and OV7670
-// XCLK at 20 MHz.
+// the iCE40 build's 39.000 MHz, which keeps the panel at a rate already
+// exercised on hardware: ST7789 SCLK at 40 MHz.
 //
 // Frame rate is set by one thing only -- the camera's internal clock:
 //
@@ -28,11 +27,14 @@
 // accumulates, which is why 256 entries sufficed -- but it also pinned the
 // frame rate at 12.5 fps while the panel could have sustained 37.2.
 //
-// CLKRC is now bypassed, so f_int = XCLK = clk_sys/2 = 20 MHz and the frame
-// rate doubles to 25.0 fps.  The camera then outruns the panel during active
-// video, and the surplus -- the integral of the rate difference over the
-// active region, up to 20160 pixels -- has to be buffered.  Hence FIFO_DEPTH
-// below.  See timing_check.py for the arithmetic.
+// f_int is now 20 MHz -- 25.01 fps -- reached by driving XCLK at the full
+// clk_sys 40 MHz and letting the sensor apply the /2 it applies regardless of
+// what CLKRC asks for (measured; see the clock note in cam_init.v).  The
+// camera then outruns the panel during active video, and the surplus -- the
+// integral of the rate difference over the active region, up to 20160 pixels
+// -- has to be buffered.  Hence FIFO_DEPTH below.  See timing_check.py for
+// the arithmetic, and CAM_XCLK_DIV/CAM_CLKRC below for the other way to land
+// on the same f_int if a sensor that honours its prescaler is fitted.
 //
 // ---------------------------------------------------------------------------
 // SPI output cells: SB_IO -> ODDR
@@ -81,6 +83,18 @@ module tangprimer25k_st7789_top #(
     parameter integer ENABLE_XORMAP      = 1,
     parameter integer ENCRYPTION_DEFAULT = 0,
     parameter [31:0]  XORMAP_INITIAL_SEED = 32'h1ACE_B00C,
+    // Camera clock pair.  These two are one setting in two halves and must be
+    // changed together, against the measured divide chain in cam_init.v:
+    //
+    //   f_int = clk_sys / (CAM_XCLK_DIV * 2 * (CAM_CLKRC[5:0]+1))
+    //                                    ^ this sensor's undocumented fixed /2
+    //
+    // has to come out at 20.000 MHz for the 25 fps this design is sized for,
+    // which pins XCLK to the full 40 MHz with the prescaler asked for /1.
+    // Do not change one without the other: raising XCLK and adding prescale
+    // cancel exactly, which is how the first attempt at 25 fps stayed at 12.5.
+    parameter integer CAM_XCLK_DIV       = 1,
+    parameter [7:0]   CAM_CLKRC          = 8'h00,
     // 1 = replace the camera with the built-in moving test pattern, keeping
     // the camera's exact pixel/line/frame timing.  Used to bisect the
     // pipeline; see tangprimer25k_pattern_top.v and `make pattern`.
@@ -117,10 +131,14 @@ module tangprimer25k_st7789_top #(
     input  wire [7:0] cam_d
 );
     // ---------------- clock ratios ----------------
-    // cam_xclk = clk_sys/2 and CLKRC is bypassed, so the camera's internal
-    // clock is clk_sys/2 and PCLK (COM14 = /2) is clk_sys/4.  Several things
-    // below are derived from this one number.
-    localparam integer CAM_INT_DIV = 2;
+    // clk_sys periods per camera internal clock: the XCLK divider in the
+    // fabric, times the fixed /2 this sensor applies whatever CLKRC says,
+    // times CLKRC's own prescale.  1 * 2 * 1 = 2, i.e. f_int = 20 MHz and
+    // PCLK (COM14 = /2) = clk_sys/4 = 10 MHz -- the floor for cam_capture's
+    // 2-flop sampling.  Several things below are derived from this number.
+    localparam integer CAM_FIXED_DIV = 2;   // measured, see cam_init.v
+    localparam integer CAM_PRESCALE  = CAM_CLKRC[5:0] + 1;
+    localparam integer CAM_INT_DIV   = CAM_XCLK_DIV * CAM_FIXED_DIV * CAM_PRESCALE;
 
     // Worst case the sensor emits its 240 output lines back to back, giving
     // the panel 240*1568/f_int = 18.8 ms to drain 67200 pixels at SPI/16.
@@ -212,15 +230,35 @@ module tangprimer25k_st7789_top #(
     end
 
     // ---------------- camera clock and static controls ----------------
-    reg cam_xclk_q = 1'b0;
-    always @(posedge clk_sys) begin
-        if (rst)
-            cam_xclk_q <= 1'b0;
-        else
-            cam_xclk_q <= ~cam_xclk_q;
-    end
+    // CAM_XCLK_DIV=1 needs clk_sys itself on the pad, which a fabric flop
+    // cannot produce -- it would have to toggle every half cycle.  ODDR does
+    // it directly: Q0 drives D0 while CLK is high and D1 while CLK is low, so
+    // D0=1/D1=0 emits a 50% duty copy of clk_sys.  Same cell the SPI pads use
+    // (see file header); the extra ODDR pipeline latency is irrelevant for a
+    // free-running clock.  The sensor is specified for 10-48 MHz XCLK, so
+    // both 20 and 40 MHz are in range.
+    generate
+        if (CAM_XCLK_DIV == 1) begin : g_xclk_full
+            ODDR cam_xclk_io (
+                .Q0  (cam_xclk),        // 40.000 MHz
+                .Q1  (),
+                .D0  (1'b1),
+                .D1  (1'b0),
+                .TX  (1'b0),
+                .CLK (clk_sys)
+            );
+        end else begin : g_xclk_div2
+            reg cam_xclk_q = 1'b0;
+            always @(posedge clk_sys) begin
+                if (rst)
+                    cam_xclk_q <= 1'b0;
+                else
+                    cam_xclk_q <= ~cam_xclk_q;
+            end
+            assign cam_xclk = cam_xclk_q;   // 20.000 MHz
+        end
+    endgenerate
 
-    assign cam_xclk  = cam_xclk_q;  // 20.000 MHz
     assign cam_rst_n = resetn;
     assign cam_pwdn  = 1'b0;
 
@@ -235,7 +273,8 @@ module tangprimer25k_st7789_top #(
         .TICK_DIV   (SYS_CLK_HZ/400000),
         .BOOT_TICKS (4000),
         .GAP_TICKS  (800),
-        .RST_TICKS  (4000)
+        .RST_TICKS  (4000),
+        .CLKRC_VAL  (CAM_CLKRC)
     ) camera_config (
         .clk      (clk_sys),
         .rst      (rst),
