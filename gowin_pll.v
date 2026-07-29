@@ -5,15 +5,17 @@
 //
 // 50.000 MHz (Tang Primer 25K dock oscillator) ->
 //     CLKOUT0  40.000 MHz  clk_sys : fabric and ST7789 SPI bit rate
-//     CLKOUT1  24.000 MHz  cam_xclk: OV7670 master clock
+//     CLKOUT1  48.000 MHz  cam_xclk: OV7670 master clock
 //     CLKOUT2 100.000 MHz  clk_cap : oversamples the camera's 12 MHz PCLK
 //
 // The second output exists because the two clocks are not related by any
-// useful small integer ratio.  With CLKRC bypassed the camera's internal clock
-// *is* XCLK, and 24 MHz is the OV7670's rated maximum -- 30.0 fps, since
-// fps = f_int / 799680.  Dividing clk_sys instead would only offer 20 MHz
-// (clk_sys/2, 25 fps) or 13.3 MHz (clk_sys/3, 16.7 fps), and raising clk_sys
-// until /2 landed on 24 MHz would drag the panel's SPI clock up with it.
+// useful small integer ratio.  Frame rate is fps = f_int / 799680, so 30 fps
+// needs f_int = 24 MHz, and this sensor runs f_int at XCLK/2 whatever CLKRC
+// asks for (measured -- see the clock note in cam_init.v).  Hence XCLK = 48
+// MHz, which is also the OV7670's rated maximum: 30 fps is the ceiling for
+// this part, with no headroom left in XCLK.  Dividing clk_sys instead would
+// only offer 40 MHz (25 fps) or 20 MHz (12.5 fps), and raising clk_sys until
+// a divide landed on 48 MHz would drag the panel's SPI clock up with it.
 //
 // GW5A's PLL primitive is PLLA (the GW1N/GW2A "rPLL" does not exist on this
 // family).  With CLKFB_SEL="INTERNAL" the frequencies are
@@ -33,7 +35,7 @@
 module gowin_pll (
     input  wire clkin,
     output wire clkout0,     // 40 MHz
-    output wire clkout1,     // 24 MHz
+    output wire clkout1,     // 48 MHz
     output wire clkout2,     // 100 MHz
     output wire lock
 );
@@ -49,7 +51,7 @@ module gowin_pll (
         .FBDIV_SEL  (1),
         .MDIV_SEL   (24),      // VCO = 50 MHz * 24 = 1200 MHz
         .ODIV0_SEL  (30),      // CLKOUT0 = 1200 / 30 = 40 MHz
-        .ODIV1_SEL  (50),      // CLKOUT1 = 1200 / 50 = 24 MHz
+        .ODIV1_SEL  (25),      // CLKOUT1 = 1200 / 25 = 48 MHz
         .ODIV2_SEL  (12),      // CLKOUT2 = 1200 / 12 = 100 MHz
         .CLKFB_SEL  ("INTERNAL"),
         .CLKOUT0_EN ("TRUE"),

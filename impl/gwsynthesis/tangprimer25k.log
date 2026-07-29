@@ -17,7 +17,7 @@ Analyzing Verilog file '/Users/arthur/tangprimer25k/st7789_camera_ctrl.v'
 Analyzing Verilog file '/Users/arthur/tangprimer25k/st7789_init_rom.v'
 Analyzing Verilog file '/Users/arthur/tangprimer25k/spi_stream_tx.v'
 Compiling module 'tangprimer25k_st7789_top'("/Users/arthur/tangprimer25k/tangprimer25k_st7789_top.v":87)
-Compiling module 'gowin_pll'("/Users/arthur/tangprimer25k/gowin_pll.v":33)
+Compiling module 'gowin_pll'("/Users/arthur/tangprimer25k/gowin_pll.v":35)
 Compiling module 'btn_debounce'("/Users/arthur/tangprimer25k/btn_debounce.v":17)
 Compiling module 'cam_init'("/Users/arthur/tangprimer25k/cam_init.v":38)
 Compiling module 'cam_capture'("/Users/arthur/tangprimer25k/cam_capture.v":45)

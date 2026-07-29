@@ -131,10 +131,17 @@ module tangprimer25k_st7789_top #(
     input  wire [7:0] cam_d
 );
     // ---------------- camera clock ----------------
-    // CLKRC is bypassed, so the sensor's internal clock is XCLK exactly and
-    // PCLK (COM14 = /2) is half of it.
-    localparam integer CAM_XCLK_HZ = 24000000;
-    localparam integer CAM_INT_HZ  = CAM_XCLK_HZ;
+    // This sensor divides XCLK by 2 whatever CLKRC asks for -- measured, see
+    // the clock note in cam_init.v -- so XCLK carries the factor of two that
+    // the prescaler will not: 48 MHz in, f_int 24 MHz, 30.01 fps, and PCLK
+    // (COM14 = /2) 12 MHz, which is what clk_cap is sized to oversample.
+    //
+    // 48 MHz is the OV7670's rated maximum XCLK.  30 fps is therefore the
+    // ceiling for this part in this design: there is no faster XCLK to give
+    // it, and f_int cannot be raised any other way.
+    localparam integer CAM_XCLK_HZ   = 48000000;
+    localparam integer CAM_SENSOR_DIV = 2;
+    localparam integer CAM_INT_HZ    = CAM_XCLK_HZ / CAM_SENSOR_DIV;
 
     // Worst case the sensor emits its 240 output lines back to back, giving
     // the panel 240*1568/f_int = 15.7 ms to drain 67200 pixels at SPI/16.
@@ -159,11 +166,11 @@ module tangprimer25k_st7789_top #(
 
     generate
         if (USE_PLL != 0) begin : g_pll
-            // 50 MHz -> 40 MHz (clk_sys) and 24 MHz (camera XCLK).
+            // 50 MHz -> 40 MHz (clk_sys) and 48 MHz (camera XCLK).
             // USE_PLL=0 is a fallback that runs clk_sys from the raw 50 MHz
-            // oscillator and gives up on 30 fps: it has no 24 MHz source, so
-            // XCLK falls back to clk_sys/2.  SYS_CLK_HZ/SPI_HZ/CAM_XCLK_HZ
-            // must be overridden to match.
+            // oscillator and gives up on 30 fps: it has no 48 MHz source, so
+            // XCLK falls back to clk_sys/2 (25 MHz, f_int 12.5 MHz, 15.6 fps).
+            // SYS_CLK_HZ/SPI_HZ/CAM_XCLK_HZ must be overridden to match.
             gowin_pll pll (
                 .clkin   (clk50),
                 .clkout0 (clk_sys),
@@ -252,7 +259,7 @@ module tangprimer25k_st7789_top #(
     end
 
     // ---------------- camera clock and static controls ----------------
-    // Forward the 24 MHz PLL output to the pad through an ODDR rather than
+    // Forward the 48 MHz PLL output to the pad through an ODDR rather than
     // routing a clock net to a general output: this is the standard way to get
     // a clean full-rate, 50%-duty clock off-chip on Gowin, and it keeps the
     // clock on clock resources right up to the pin.

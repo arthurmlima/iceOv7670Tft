@@ -15,10 +15,11 @@ and checks the two conditions that still have to hold.
 
 SYS_HZ = 40_000_000     # Tang Primer 25K: PLLA CLKOUT0, 50 MHz -> 40 MHz
 SPI_HZ = 40_000_000     # full-rate DDR SPI engine: SPI_HZ = SYS_HZ
-XCLK_HZ = 24_000_000    # PLLA CLKOUT1, the OV7670's rated maximum
+XCLK_HZ = 48_000_000    # PLLA CLKOUT1, the OV7670's rated maximum
 CAP_HZ = 100_000_000    # PLLA CLKOUT2: oversamples PCLK in cam_capture
 CLKRC_DIV = 1           # CLKRC = 0x00, no prescale
-CAM_INT_HZ = XCLK_HZ / CLKRC_DIV
+SENSOR_DIV = 2          # this sensor's fixed /2, measured; see cam_init.v
+CAM_INT_HZ = XCLK_HZ / (SENSOR_DIV * CLKRC_DIV)
 PCLK_HZ = CAM_INT_HZ / 2        # COM14 PCLK divider
 
 # OV7670 frame geometry, in internal-clock cycles.  510 lines of 1568 whatever
@@ -64,11 +65,16 @@ assert deficit_pixels <= FIFO_DEPTH, \
 assert FIFO_DEPTH * BITS_PER_PIXEL <= BSRAM_BITS, "FIFO does not fit in BSRAM"
 assert cap_per_pclk >= 4, \
     f"cam_capture wants >=4 capture periods per PCLK, has {cap_per_pclk:.1f}"
+assert XCLK_HZ <= 48e6, \
+    f"XCLK {XCLK_HZ/1e6:.3f} MHz exceeds the OV7670's 48 MHz maximum"
+assert abs(fps - 30.0) < 0.5, \
+    f"target is 30 fps, this clock plan gives {fps:.2f}"
 
 print(f"System clock:          {SYS_HZ/1e6:.6f} MHz")
 print(f"ST7789 SPI clock:      {SPI_HZ/1e6:.6f} MHz")
 print(f"OV7670 XCLK:           {XCLK_HZ/1e6:.6f} MHz")
-print(f"OV7670 internal clock: {CAM_INT_HZ/1e6:.6f} MHz  (CLKRC /{CLKRC_DIV})")
+print(f"OV7670 internal clock: {CAM_INT_HZ/1e6:.6f} MHz  "
+      f"(sensor /{SENSOR_DIV}, CLKRC /{CLKRC_DIV})")
 print(f"OV7670 PCLK:           {PCLK_HZ/1e6:.6f} MHz")
 print(f"Capture clock:         {CAP_HZ/1e6:.6f} MHz")
 print()
